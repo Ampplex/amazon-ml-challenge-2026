@@ -291,15 +291,38 @@ class BM25Retriever:
 
     def fit(self, records: Dict[str, Record]) -> None:
         """Build true token inverted index from candidate records using compact 32-bit arrays."""
-        self.inverted_index = defaultdict(lambda: array('i'))
+        self.inverted_index = {}
         self.id_list = []
         doc_lens = []
 
+        N = sum(1 for rec in records.values() if rec.source_id != "S1")
+        if N == 0:
+            logger.warning("BM25Retriever: empty corpus, disabled")
+            return
+
+        # Pre-count document frequency to filter out single-occurrence typo tokens for large corpora
+        # This keeps the dictionary to ~100k terms instead of 2,000,000 arrays!
+        min_df = 2 if N > 100 else 1
+        max_df = int(0.40 * N) if N > 100 else N
+
+        token_df = Counter()
+        for rid, rec in records.items():
+            if rec.source_id == "S1":
+                continue
+            toks = set(rec.name_tokens + rec.address_tokens)
+            if toks:
+                token_df.update(toks)
+
+        valid_tokens = {tok for tok, df in token_df.items() if df >= min_df and (df <= max_df or N <= 100)}
+        del token_df
+        gc.collect()
+
+        inv_idx = defaultdict(lambda: array('i'))
         doc_idx = 0
         for rid, rec in records.items():
             if rec.source_id == "S1":
                 continue
-            tokens = rec.name_tokens + rec.address_tokens
+            tokens = [t for t in (rec.name_tokens + rec.address_tokens) if t in valid_tokens]
             if not tokens:
                 continue
             self.id_list.append(rid)
@@ -308,34 +331,25 @@ class BM25Retriever:
             # Count term frequencies in this document
             tf_map = Counter(tokens)
             for tok, count in tf_map.items():
-                self.inverted_index[tok].append((doc_idx << 6) | min(count, 63))
+                inv_idx[tok].append((doc_idx << 6) | min(count, 63))
 
             doc_idx += 1
 
-        N = len(self.id_list)
-        if N == 0:
-            logger.warning("BM25Retriever: empty corpus, disabled")
-            return
-
         self.doc_lens = np.array(doc_lens, dtype=np.float32)
-        self.avgdl = float(np.mean(self.doc_lens))
+        self.avgdl = float(np.mean(self.doc_lens)) if len(self.doc_lens) > 0 else 1.0
 
         # Compute Robertson-Spärck Jones / Okapi IDF with +1 smoothing for non-negativity
-        # IDF(q) = ln(1 + (N - df + 0.5) / (df + 0.5))
         self.idf = {}
-        max_df = int(0.40 * N)
-        pruned_index = {}
-        for tok, postings in self.inverted_index.items():
+        for tok, postings in inv_idx.items():
             df = len(postings)
-            if df > max_df and N > 100:
-                continue
             idf_val = math.log(1.0 + (N - df + 0.5) / (df + 0.5))
             if idf_val > 0.05:
                 self.idf[tok] = idf_val
-                pruned_index[tok] = postings
 
-        self.inverted_index = pruned_index
-        logger.info(f"BM25Retriever: inverted index ready on {N} documents, {len(self.idf)} unique terms (avgdl={self.avgdl:.1f})")
+        self.inverted_index = {tok: inv_idx[tok] for tok in self.idf}
+        del inv_idx
+        gc.collect()
+        logger.info(f"BM25Retriever: inverted index ready on {len(self.id_list)} documents, {len(self.idf)} unique terms (avgdl={self.avgdl:.1f})")
 
     def query(self, s1_record: Record, top_k: int = 20) -> List[Tuple[str, float, int]]:
         """Query BM25 index via sparse score accumulation. Returns (id, score, rank)."""
