@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Data Structures
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class Record:
     """Canonical internal representation of a business entity record."""
     record_id: str
@@ -49,7 +49,7 @@ class Record:
     source_metadata: Dict = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class CandidatePair:
     """A candidate pair linking an S1 entity to an S2/S3 candidate."""
     s1_id: str
@@ -184,7 +184,7 @@ def build_records(df: pd.DataFrame) -> Dict[str, Record]:
     return records
 
 
-def get_country_partition_records(filepath: str, country: str, chunksize: int = 250000, fallback_on_empty_unknown: bool = True) -> Dict[str, Record]:
+def get_country_partition_records(filepath: str, country: str, chunksize: int = 250000, fallback_on_empty_unknown: bool = True, existing_dict: Optional[Dict[str, Record]] = None) -> Dict[str, Record]:
     """Stream-load TSV records for a specific country partition directly into Record objects.
     
     Unified for both training and inference:
@@ -197,7 +197,7 @@ def get_country_partition_records(filepath: str, country: str, chunksize: int = 
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Source file not found: {filepath}")
 
-    records = {}
+    records = existing_dict if existing_dict is not None else {}
     country_target = country.strip().lower()
     is_unknown = (country_target == "unknown" or not country_target)
 

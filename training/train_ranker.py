@@ -312,20 +312,21 @@ def run_training(
         for sid, rec in p_holdout_s1.items():
             s1_text_cache[sid] = (rec.normalized_name, rec.normalized_address)
 
-        p_s2 = get_country_partition_records(s2_path, country)
-        p_s3 = get_country_partition_records(s3_path, country)
-
         if sample_s1_size:
-            # Subsample distractors for verification run to fit small RAM
+            p_s2 = get_country_partition_records(s2_path, country)
+            p_s3 = get_country_partition_records(s3_path, country)
             relevant_m = {m for matches in gt_dict.values() for m in matches}
             s2_sub = [k for k in p_s2 if k in relevant_m] + [k for k in p_s2 if k not in relevant_m][:sample_s1_size * 5]
             s3_sub = [k for k in p_s3 if k in relevant_m] + [k for k in p_s3 if k not in relevant_m][:sample_s1_size * 5]
-            p_s2 = {k: p_s2[k] for k in s2_sub}
-            p_s3 = {k: p_s3[k] for k in s3_sub}
+            cand_partition = {k: p_s2[k] for k in s2_sub}
+            cand_partition.update({k: p_s3[k] for k in s3_sub})
+            del p_s2, p_s3
+        else:
+            cand_partition = get_country_partition_records(s2_path, country)
+            get_country_partition_records(s3_path, country, existing_dict=cand_partition)
 
-        logger.info(f"Partition counts: S1={len(p_s1):,}, S2={len(p_s2):,}, S3={len(p_s3):,}")
+        logger.info(f"Partition counts: S1={len(p_s1):,}, Candidates={len(cand_partition):,}")
 
-        cand_partition = {**p_s2, **p_s3}
         normalize_all_names(cand_partition, config)
         normalize_all_addresses(cand_partition, config)
 
@@ -386,7 +387,7 @@ def run_training(
                         holdout_buffer.add(pf)
 
         total_country_filter_hits += cand_gen.country_filter_hits
-        del cand_gen, p_s2, p_s3, cand_partition
+        del cand_gen, cand_partition, p_s1, p_train_s1, p_cal_s1, p_holdout_s1
         gc.collect()
 
     # Flush all remaining buffer chunks to disk
