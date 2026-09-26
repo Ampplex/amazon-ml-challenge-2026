@@ -65,29 +65,43 @@ class ExactBlocker:
             nums = rec.numeric_tokens
 
             if country and postal:
-                idx_cp[f"{country}|{postal}"].append(rid)
+                l = idx_cp[f"{country}|{postal}"]
+                if len(l) < 50:
+                    l.append(rid)
             if postal and tokens:
-                idx_pn[f"{postal}|{tokens[0]}"].append(rid)
+                l = idx_pn[f"{postal}|{tokens[0]}"]
+                if len(l) < 50:
+                    l.append(rid)
             if country and len(tokens) >= 2:
-                idx_tokens[f"{country}|{tokens[0]}|{tokens[1]}"].append(rid)
+                l = idx_tokens[f"{country}|{tokens[0]}|{tokens[1]}"]
+                if len(l) < 50:
+                    l.append(rid)
             elif country and len(tokens) == 1:
-                idx_tokens[f"{country}|{tokens[0]}"].append(rid)
+                l = idx_tokens[f"{country}|{tokens[0]}"]
+                if len(l) < 50:
+                    l.append(rid)
             if country and compact and len(compact) >= 5:
-                idx_cnp[f"{country}|{compact[:5]}"].append(rid)
+                l = idx_cnp[f"{country}|{compact[:5]}"]
+                if len(l) < 50:
+                    l.append(rid)
             if country and nums and tokens:
-                idx_num_tok[f"{country}|{nums[0]}|{tokens[0]}"].append(rid)
+                l = idx_num_tok[f"{country}|{nums[0]}|{tokens[0]}"]
+                if len(l) < 50:
+                    l.append(rid)
             if country:
                 for t in tokens:
                     if len(t) >= 4 and t not in self.stop_words:
-                        idx_distinctive[f"{country}|{t}"].append(rid)
+                        l = idx_distinctive[f"{country}|{t}"]
+                        if len(l) < 50:
+                            l.append(rid)
 
         self.indexes = {
-            "country_postal": dict(idx_cp),
-            "postal_name": dict(idx_pn),
-            "country_tokens": dict(idx_tokens),
-            "country_compact": dict(idx_cnp),
-            "country_num_tok": dict(idx_num_tok),
-            "country_distinctive": dict(idx_distinctive),
+            "country_postal": idx_cp,
+            "postal_name": idx_pn,
+            "country_tokens": idx_tokens,
+            "country_compact": idx_cnp,
+            "country_num_tok": idx_num_tok,
+            "country_distinctive": idx_distinctive,
         }
         total = sum(len(v) for idx in self.indexes.values() for v in idx.values())
         logger.info(f"ExactBlocker: built {len(self.indexes)} inverted indexes with {total} entries")
@@ -171,6 +185,7 @@ class TFIDFRetriever:
             analyzer=analyzer,
             ngram_range=ngram_range,
             max_features=tfidf_cfg.get("max_features", 50000),
+            dtype=np.float32,
             sublinear_tf=True,
             norm="l2",
         )
