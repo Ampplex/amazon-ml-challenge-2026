@@ -18,6 +18,7 @@ from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import scipy.sparse as sp
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -192,8 +193,8 @@ class TFIDFRetriever:
         self.matrix = None
         self.id_list: List[str] = []
 
-    def fit(self, records: Dict[str, Record]) -> None:
-        """Fit TF-IDF on candidate records."""
+    def fit(self, records: Dict[str, Record], chunk_size: int = 100000) -> None:
+        """Fit TF-IDF on candidate records with bounded memory streaming."""
         texts = []
         ids = []
         for rid, rec in records.items():
@@ -206,9 +207,25 @@ class TFIDFRetriever:
             ids.append(rid)
 
         self.id_list = ids
-        if texts:
-            self.matrix = self.vectorizer.fit_transform(texts)
-            logger.info(f"TFIDFRetriever({self.field}, {self.analyzer}): fitted on {len(ids)} records")
+        if not texts:
+            return
+
+        # Fit vocabulary on a representative sample (bounded by 100k) to prevent memory spikes
+        vocab_sample_size = min(len(texts), 100000)
+        self.vectorizer.fit(texts[:vocab_sample_size])
+
+        # Transform corpus in streaming chunks and vstack directly
+        if len(texts) <= chunk_size:
+            self.matrix = self.vectorizer.transform(texts)
+        else:
+            chunks = []
+            for start in range(0, len(texts), chunk_size):
+                chunk_mat = self.vectorizer.transform(texts[start:start + chunk_size])
+                chunks.append(chunk_mat)
+            self.matrix = sp.vstack(chunks, format="csr")
+
+        del texts
+        logger.info(f"TFIDFRetriever({self.field}, {self.analyzer}): fitted on {len(ids)} records")
 
     def query(self, s1_record: Record, top_k: int = 20) -> List[Tuple[str, float, int]]:
         """Query for similar records using fast sparse dot product. Returns (id, score, rank)."""
