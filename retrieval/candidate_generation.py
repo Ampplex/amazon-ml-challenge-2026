@@ -13,6 +13,7 @@ Integrates:
 import heapq
 import logging
 import math
+from array import array
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -261,8 +262,8 @@ class BM25Retriever:
         self.b: float = float(bm25_cfg.get("b", 0.75))
 
     def fit(self, records: Dict[str, Record]) -> None:
-        """Build true token inverted index from candidate records."""
-        self.inverted_index = defaultdict(list)
+        """Build true token inverted index from candidate records using compact 32-bit arrays."""
+        self.inverted_index = defaultdict(lambda: array('i'))
         self.id_list = []
         doc_lens = []
 
@@ -279,7 +280,7 @@ class BM25Retriever:
             # Count term frequencies in this document
             tf_map = Counter(tokens)
             for tok, count in tf_map.items():
-                self.inverted_index[tok].append((doc_idx, count))
+                self.inverted_index[tok].append((doc_idx << 6) | min(count, 63))
 
             doc_idx += 1
 
@@ -330,7 +331,9 @@ class BM25Retriever:
                 continue
             idf_q = idf_dict[q]
             postings = inv_idx[q]
-            for doc_idx, tf in postings:
+            for packed in postings:
+                doc_idx = packed >> 6
+                tf = packed & 63
                 dl = doc_lens[doc_idx]
                 denom = tf + k1 * (1.0 - b + b * (dl / avgdl))
                 doc_scores[doc_idx] += idf_q * (tf * (k1 + 1.0) / denom)

@@ -8,7 +8,7 @@ to load TSV data from all sources.
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import yaml
@@ -20,33 +20,92 @@ logger = logging.getLogger(__name__)
 # Data Structures
 # =============================================================================
 
-@dataclass(slots=True)
 class Record:
-    """Canonical internal representation of a business entity record."""
-    record_id: str
-    source_id: str  # "S1", "S2", or "S3"
+    """Canonical internal representation of a business entity record.
+    Uses ultra-compact __slots__ and dynamic on-the-fly properties for tokens
+    to avoid allocating 80M+ Python heap objects across millions of records.
+    """
+    __slots__ = (
+        "record_id", "source_id", "original_name", "normalized_name",
+        "compact_name", "original_address", "normalized_address",
+        "country", "state", "city", "locality", "postal_code",
+        "house_number", "road", "landmark", "source_metadata"
+    )
 
-    original_name: str = ""
-    normalized_name: str = ""
-    compact_name: str = ""
-    name_tokens: List[str] = field(default_factory=list)
+    def __init__(
+        self,
+        record_id: str,
+        source_id: str,
+        original_name: str = "",
+        normalized_name: str = "",
+        compact_name: str = "",
+        name_tokens: Optional[List[str]] = None,
+        original_address: str = "",
+        normalized_address: str = "",
+        address_tokens: Optional[List[str]] = None,
+        country: str = "",
+        state: str = "",
+        city: str = "",
+        locality: str = "",
+        postal_code: str = "",
+        house_number: str = "",
+        road: str = "",
+        landmark: str = "",
+        numeric_tokens: Optional[List[str]] = None,
+        record_text: str = "",
+        source_metadata: Optional[Dict] = None,
+    ):
+        self.record_id = record_id
+        self.source_id = source_id
+        self.original_name = original_name
+        self.normalized_name = normalized_name if normalized_name else (" ".join(name_tokens) if name_tokens else "")
+        self.compact_name = compact_name
+        self.original_address = original_address
+        self.normalized_address = normalized_address if normalized_address else (" ".join(address_tokens) if address_tokens else "")
+        self.country = country
+        self.state = state
+        self.city = city
+        self.locality = locality
+        self.postal_code = postal_code
+        self.house_number = house_number
+        self.road = road
+        self.landmark = landmark
+        self.source_metadata = source_metadata if source_metadata is not None else {}
 
-    original_address: str = ""
-    normalized_address: str = ""
-    address_tokens: List[str] = field(default_factory=list)
+    @property
+    def name_tokens(self) -> List[str]:
+        return self.normalized_name.split() if self.normalized_name else []
 
-    country: str = ""
-    state: str = ""
-    city: str = ""
-    locality: str = ""
-    postal_code: str = ""
-    house_number: str = ""
-    road: str = ""
-    landmark: str = ""
-    numeric_tokens: List[str] = field(default_factory=list)
+    @name_tokens.setter
+    def name_tokens(self, val: Any) -> None:
+        if val and not self.normalized_name:
+            self.normalized_name = " ".join(val)
 
-    record_text: str = ""
-    source_metadata: Dict = field(default_factory=dict)
+    @property
+    def address_tokens(self) -> List[str]:
+        return self.normalized_address.split() if self.normalized_address else []
+
+    @address_tokens.setter
+    def address_tokens(self, val: Any) -> None:
+        if val and not self.normalized_address:
+            self.normalized_address = " ".join(val)
+
+    @property
+    def numeric_tokens(self) -> List[str]:
+        tokens = (self.normalized_name + " " + self.normalized_address).split()
+        return [t for t in tokens if any(c.isdigit() for c in t)]
+
+    @numeric_tokens.setter
+    def numeric_tokens(self, val: Any) -> None:
+        pass  # Derived on-the-fly
+
+    @property
+    def record_text(self) -> str:
+        return f"{self.normalized_name} | {self.normalized_address} | {self.country}"
+
+    @record_text.setter
+    def record_text(self, val: Any) -> None:
+        pass
 
 
 @dataclass(slots=True)

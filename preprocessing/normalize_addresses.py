@@ -263,9 +263,8 @@ def normalize_address(record: Record, config: dict = None) -> Record:
     city_state = _extract_city_state(address, country)
     record.city = city_state["city"]
     record.state = city_state["state"]
-
-    # Build record_text for full-record embedding
-    record.record_text = f"{record.normalized_name} | {record.normalized_address} | {record.country}"
+    # Free original address string to save memory across millions of records
+    record.original_address = ""
 
     return record
 
