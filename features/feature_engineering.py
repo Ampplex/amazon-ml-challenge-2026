@@ -303,12 +303,25 @@ class RarityFeatureComputer:
 
         logger.info(f"Rarity: {len(self.idf_cache)} unique tokens, median IDF={self.median_idf:.3f}")
 
-    def fit_from_source_files(self, filepaths: List[str], chunksize: int = 250000) -> None:
+    def fit_from_source_files(self, filepaths: List[str], chunksize: int = 250000, cache_path: Optional[str] = None) -> None:
         """Compute token document frequencies directly from raw candidate TSV files in streaming chunks.
         
         Guarantees zero S1 leakage by strictly processing candidate sources (S2 + S3) and bounds
         RAM usage by avoiding loading full Record objects into memory.
         """
+        if cache_path and os.path.exists(cache_path):
+            try:
+                import pickle
+                with open(cache_path, "rb") as f:
+                    data = pickle.load(f)
+                self.total_docs = data["total_docs"]
+                self.idf_cache = data["idf_cache"]
+                self.median_idf = data["median_idf"]
+                logger.info(f"Loaded cached rarity statistics: {len(self.idf_cache)} unique tokens from {self.total_docs} docs (median IDF={self.median_idf:.3f})")
+                return
+            except Exception as e:
+                logger.warning(f"Could not load rarity cache from {cache_path}: {e}")
+
         self.token_df = Counter()
         self.total_docs = 0
 
@@ -335,6 +348,16 @@ class RarityFeatureComputer:
             self.median_idf = 0.0
 
         logger.info(f"Rarity (streaming): {len(self.idf_cache)} unique tokens from {self.total_docs} candidate docs, median IDF={self.median_idf:.3f}")
+
+        if cache_path:
+            try:
+                import pickle
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    pickle.dump({"total_docs": self.total_docs, "idf_cache": self.idf_cache, "median_idf": self.median_idf}, f)
+                logger.info(f"Saved rarity statistics cache to {cache_path}")
+            except Exception as e:
+                logger.warning(f"Could not save rarity cache to {cache_path}: {e}")
 
     def _get_idf(self, token: str) -> float:
         return self.idf_cache.get(token, self.median_idf)

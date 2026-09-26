@@ -263,7 +263,8 @@ def run_training(
     # 4. Initialize Feature Engine (Streaming Rarity on candidate sources)
     logger.info("=== STEP 4: Streaming Rarity Fitting & Feature Engine Setup ===")
     feature_engine = FeatureEngine(config)
-    feature_engine.rarity_computer.fit_from_source_files([s2_path, s3_path])
+    rarity_cache_path = os.path.join(cache_dir, "rarity_idf_stats.pkl")
+    feature_engine.rarity_computer.fit_from_source_files([s2_path, s3_path], cache_path=rarity_cache_path)
     feature_engine.set_embeddings_cache(None)
 
     dense_cfg = config.get("retrieval", {}).get("dense_ann", {})
@@ -313,7 +314,7 @@ def run_training(
         p_s2 = get_country_partition_records(s2_path, country)
         p_s3 = get_country_partition_records(s3_path, country)
 
-        if sample_s1_size and sample_s1_size < len(s1_records):
+        if sample_s1_size:
             # Subsample distractors for verification run to fit small RAM
             relevant_m = {m for matches in gt_dict.values() for m in matches}
             s2_sub = [k for k in p_s2 if k in relevant_m] + [k for k in p_s2 if k not in relevant_m][:sample_s1_size * 5]
