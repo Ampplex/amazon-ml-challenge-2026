@@ -58,7 +58,73 @@ A production-grade, two-stage retrieval and matching architecture designed for t
 pip install -r requirements.txt
 ```
 
-### 2. End-to-End Training
+### 2. Dataset Setup
+
+Download the competition dataset zip archive (e.g., `student_resource.zip` or `dataset.zip`) from the challenge portal and place it in the project root directory.
+
+#### Automated Setup (Recommended)
+
+Run the following commands to extract and link the dataset files into the expected directory structure:
+
+```bash
+# 1. Extract the downloaded zip into dataset/
+unzip student_resource.zip -d dataset/
+
+# 2. Link or copy the train and test files to dataset/train and dataset/test:
+mkdir -p dataset/train dataset/test
+
+# If extracted into the competition nested path:
+if [ -d "dataset/student_resource/student_resource/dataset" ]; then
+    ln -sf "$(pwd)/dataset/student_resource/student_resource/dataset/train/"*.tsv dataset/train/
+    ln -sf "$(pwd)/dataset/student_resource/student_resource/dataset/test/"*.tsv dataset/test/
+elif [ -d "dataset/dataset" ]; then
+    ln -sf "$(pwd)/dataset/dataset/train/"*.tsv dataset/train/
+    ln -sf "$(pwd)/dataset/dataset/test/"*.tsv dataset/test/
+fi
+```
+
+#### Expected Directory Layout
+
+Ensure your `dataset/` directory contains all 7 required TSV files:
+
+```text
+dataset/
+├── train/
+│   ├── train_source1.tsv         # Source 1 training entities
+│   ├── train_source2.tsv         # Source 2 candidate corpus
+│   ├── train_source3.tsv         # Source 3 candidate corpus
+│   └── train_ground_truth.tsv    # Ground truth mapping (source1_entity_id -> matched_entity_ids)
+└── test/
+    ├── test_source1.tsv          # Source 1 test query entities
+    ├── test_source2.tsv          # Source 2 candidate corpus
+    └── test_source3.tsv          # Source 3 candidate corpus
+```
+
+#### Verify Dataset Setup
+
+Run this one-line verification to confirm all 7 dataset files are in place:
+
+```bash
+python3 -c "
+import os, sys
+required = [
+    'dataset/train/train_source1.tsv',
+    'dataset/train/train_source2.tsv',
+    'dataset/train/train_source3.tsv',
+    'dataset/train/train_ground_truth.tsv',
+    'dataset/test/test_source1.tsv',
+    'dataset/test/test_source2.tsv',
+    'dataset/test/test_source3.tsv'
+]
+missing = [f for f in required if not os.path.exists(f)]
+if missing:
+    print('ERROR: Missing dataset files:\n  ' + '\n  '.join(missing))
+    sys.exit(1)
+print('SUCCESS: All 7 required dataset files are present and ready!')
+"
+```
+
+### 3. End-to-End Training
 To run the full training pipeline on the training dataset:
 ```bash
 python3 main.py --mode train
@@ -68,19 +134,19 @@ python3 main.py --mode train
 python3 main.py --mode train --sample-size 25000
 ```
 
-### 3. Inference on Test Set
+### 4. Inference on Test Set
 To generate both `candidate_pairs.tsv` and `matching_results.tsv`:
 ```bash
 python3 main.py --mode infer
 ```
 
-### 4. Validate Submission
+### 5. Validate Submission
 Verify all submission formatting constraints locally:
 ```bash
 python3 main.py --mode validate
 ```
 
-### 5. Package Submission Zip
+### 6. Package Submission Zip
 Create the final submission archive `<team_name>_submission.zip`:
 ```bash
 python3 utils/package_submission.py --team-name "AntigravityTeam"
