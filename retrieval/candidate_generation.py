@@ -10,6 +10,7 @@ Integrates:
 6. Reciprocal Rank Fusion (RRF) Candidate Compression
 """
 
+import gc
 import heapq
 import logging
 import math
@@ -180,7 +181,10 @@ class TFIDFRetriever:
             else:
                 ngram_range = tuple(tfidf_cfg.get("name_char_ngram_range", [3, 4]))
         else:
-            ngram_range = tuple(tfidf_cfg.get("name_word_ngram_range", [1, 2]))
+            if field == "address":
+                ngram_range = tuple(tfidf_cfg.get("address_word_ngram_range", [1, 2]))
+            else:
+                ngram_range = tuple(tfidf_cfg.get("name_word_ngram_range", [1, 2]))
 
         self.vectorizer = TfidfVectorizer(
             analyzer=analyzer,
@@ -193,7 +197,7 @@ class TFIDFRetriever:
         self.matrix = None
         self.id_list: List[str] = []
 
-    def fit(self, records: Dict[str, Record], chunk_size: int = 100000) -> None:
+    def fit(self, records: Dict[str, Record]) -> None:
         """Fit TF-IDF on candidate records with bounded memory streaming."""
         texts = []
         ids = []
@@ -214,17 +218,9 @@ class TFIDFRetriever:
         vocab_sample_size = min(len(texts), 100000)
         self.vectorizer.fit(texts[:vocab_sample_size])
 
-        # Transform corpus in streaming chunks and vstack directly
-        if len(texts) <= chunk_size:
-            self.matrix = self.vectorizer.transform(texts)
-        else:
-            chunks = []
-            for start in range(0, len(texts), chunk_size):
-                chunk_mat = self.vectorizer.transform(texts[start:start + chunk_size])
-                chunks.append(chunk_mat)
-            self.matrix = sp.vstack(chunks, format="csr")
-
+        self.matrix = self.vectorizer.transform(texts)
         del texts
+        gc.collect()
         logger.info(f"TFIDFRetriever({self.field}, {self.analyzer}): fitted on {len(ids)} records")
 
     def query(self, s1_record: Record, top_k: int = 20) -> List[Tuple[str, float, int]]:
@@ -407,7 +403,7 @@ class CandidateGenerator:
         self.exact_blocker = ExactBlocker(config)
         self.name_char_tfidf = TFIDFRetriever(config, field="name", analyzer="char_wb")
         self.name_word_tfidf = TFIDFRetriever(config, field="name", analyzer="word")
-        self.address_char_tfidf = TFIDFRetriever(config, field="address", analyzer="char_wb")
+        self.address_char_tfidf = TFIDFRetriever(config, field="address", analyzer="word")
         self.bm25 = BM25Retriever(config)
 
         dense_cfg = config.get("retrieval", {}).get("dense_ann", {})
