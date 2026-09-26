@@ -238,30 +238,30 @@ def run_training(
     else:
         logger.info(f"Running on FULL S1 training set ({len(s1_df):,} S1 entities)")
 
-    # 2. Build S1 Record objects & Normalization
-    logger.info("=== STEP 2: S1 Normalization & Parsing ===")
-    s1_records = build_records(s1_df)
-    del s1_df
-    normalize_all_names(s1_records, config)
-    normalize_all_addresses(s1_records, config)
+    # 2. Entity-Level 3-Way Split: Train (80%), Calibration (10%), Holdout (10%)
+    logger.info("=== STEP 2: Entity-Level 3-Way Split (Train / Calibration / Holdout) ===")
+    s1_countries = {str(c).strip().lower() for c in s1_df["country"].dropna().unique() if str(c).strip()}
+    has_empty_country = s1_df["country"].isna().any() or (s1_df["country"].astype(str).str.strip() == "").any()
+    country_partitions = sorted(list(s1_countries))
+    if has_empty_country or not country_partitions:
+        country_partitions.append("unknown")
 
-    # 3. Entity-Level 3-Way Split: Train (80%), Calibration (10%), Holdout (10%)
-    logger.info("=== STEP 3: Entity-Level 3-Way Split (Train / Calibration / Holdout) ===")
-    s1_ids = list(s1_records.keys())
+    s1_ids = list(s1_df["entity_id"].astype(str))
     train_s1_ids, cal_s1_ids, holdout_s1_ids = split_train_cal_holdout(
         s1_ids, cal_ratio=0.10, holdout_ratio=0.10, seed=random_seed
     )
-
-    train_s1_records = {k: s1_records[k] for k in train_s1_ids}
-    cal_s1_records = {k: s1_records[k] for k in cal_s1_ids}
-    holdout_s1_records = {k: s1_records[k] for k in holdout_s1_ids}
+    train_id_set = set(train_s1_ids)
+    cal_id_set = set(cal_s1_ids)
+    holdout_id_set = set(holdout_s1_ids)
 
     train_gt = {k: gt_dict.get(k, []) for k in train_s1_ids}
     cal_gt = {k: gt_dict.get(k, []) for k in cal_s1_ids}
     holdout_gt = {k: gt_dict.get(k, []) for k in holdout_s1_ids}
+    del s1_df
+    gc.collect()
 
-    # 4. Initialize Feature Engine (Streaming Rarity on candidate sources)
-    logger.info("=== STEP 4: Streaming Rarity Fitting & Feature Engine Setup ===")
+    # 3. Initialize Feature Engine (Streaming Rarity on candidate sources)
+    logger.info("=== STEP 3: Streaming Rarity Fitting & Feature Engine Setup ===")
     feature_engine = FeatureEngine(config)
     rarity_cache_path = os.path.join(cache_dir, "rarity_idf_stats.pkl")
     feature_engine.rarity_computer.fit_from_source_files([s2_path, s3_path], cache_path=rarity_cache_path)
@@ -281,35 +281,36 @@ def run_training(
     holdout_buffer = BinaryFeatureBuffer(cache_dir, "holdout", feature_engine, store_ids=True)
     unmined_buffer = UnminedChunkBuffer(cache_dir, feature_engine)
 
-    # Candidate text cache for selective Cross-Encoder reranking (stores norm_name, norm_addr)
+    # Text caches for selective Cross-Encoder reranking (stores lightweight (norm_name, norm_addr) tuples)
+    s1_text_cache: Dict[str, Tuple[str, str]] = {}
     cand_text_cache: Dict[str, Tuple[str, str]] = {}
 
     recall_gate = IncrementalRecallGate(holdout_gt)
     total_country_filter_hits = 0
 
-    # Determine unique country partitions present in S1
-    s1_countries = {r.country for r in s1_records.values() if r.country}
-    has_empty_country = any(not r.country for r in s1_records.values())
-    country_partitions = sorted(list(s1_countries))
-    if has_empty_country or not country_partitions:
-        country_partitions.append("unknown")
-
     logger.info(f"Processing {len(country_partitions)} country partitions: {country_partitions}")
 
-    # 5. Country Partition Loop: Retrieval & Disk-Backed Feature Extraction
+    # 4. Country Partition Loop: Retrieval & Disk-Backed Feature Extraction
     for country in country_partitions:
         logger.info(f"\n--- Country Partition: {country.upper()} ---")
-        if country == "unknown":
-            p_s1 = {k: v for k, v in s1_records.items() if not v.country}
-        else:
-            p_s1 = {k: v for k, v in s1_records.items() if v.country == country}
+        p_s1 = get_country_partition_records(s1_path, country)
+        if sample_s1_size:
+            p_s1 = {k: v for k, v in p_s1.items() if k in sampled_s1_ids}
 
         if not p_s1:
             continue
 
-        p_train_s1 = {k: v for k, v in p_s1.items() if k in train_s1_records}
-        p_cal_s1 = {k: v for k, v in p_s1.items() if k in cal_s1_records}
-        p_holdout_s1 = {k: v for k, v in p_s1.items() if k in holdout_s1_records}
+        normalize_all_names(p_s1, config)
+        normalize_all_addresses(p_s1, config)
+
+        p_train_s1 = {k: v for k, v in p_s1.items() if k in train_id_set}
+        p_cal_s1 = {k: v for k, v in p_s1.items() if k in cal_id_set}
+        p_holdout_s1 = {k: v for k, v in p_s1.items() if k in holdout_id_set}
+
+        for sid, rec in p_cal_s1.items():
+            s1_text_cache[sid] = (rec.normalized_name, rec.normalized_address)
+        for sid, rec in p_holdout_s1.items():
+            s1_text_cache[sid] = (rec.normalized_name, rec.normalized_address)
 
         p_s2 = get_country_partition_records(s2_path, country)
         p_s3 = get_country_partition_records(s3_path, country)
@@ -480,7 +481,7 @@ def run_training(
         amb_pairs = [(s1, c) for s1, cands in ambiguous_dict.items() for c in cands]
         if amb_pairs:
             logger.info(f"Reranking {len(amb_pairs):,} ambiguous calibration pairs with Cross-Encoder...")
-            ce_scores_lookup = cross_encoder.rerank(amb_pairs, s1_records, cand_text_cache)
+            ce_scores_lookup = cross_encoder.rerank(amb_pairs, s1_text_cache, cand_text_cache)
 
     fused_scores_cal = np.zeros(len(raw_scores_cal), dtype=np.float32)
     for i, (s1_id, cand_id) in enumerate(zip(c_s1_all, c_cand_all)):
@@ -516,7 +517,7 @@ def run_training(
         amb_h_pairs = [(s1, c) for s1, cands in amb_holdout.items() for c in cands]
         if amb_h_pairs:
             logger.info(f"Reranking {len(amb_h_pairs):,} ambiguous holdout pairs with Cross-Encoder...")
-            ce_holdout_lookup = cross_encoder.rerank(amb_h_pairs, s1_records, cand_text_cache)
+            ce_holdout_lookup = cross_encoder.rerank(amb_h_pairs, s1_text_cache, cand_text_cache)
 
     fused_scores_holdout = np.zeros(len(raw_scores_holdout), dtype=np.float32)
     for i, (s1_id, cand_id) in enumerate(zip(h_s1_all, h_cand_all)):

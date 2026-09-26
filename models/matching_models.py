@@ -227,7 +227,12 @@ class CrossEncoderReranker:
             s1_rec = s1_records.get(s1_id)
             cand_rec = candidate_records.get(cand_id)
             if s1_rec and cand_rec:
-                text_a = f"{s1_rec.normalized_name} {s1_rec.normalized_address}" if hasattr(s1_rec, "normalized_name") else str(s1_rec)
+                if isinstance(s1_rec, tuple):
+                    text_a = f"{s1_rec[0]} {s1_rec[1]}"
+                elif hasattr(s1_rec, "normalized_name"):
+                    text_a = f"{s1_rec.normalized_name} {s1_rec.normalized_address}"
+                else:
+                    text_a = str(s1_rec)
                 if isinstance(cand_rec, tuple):
                     text_b = f"{cand_rec[0]} {cand_rec[1]}"
                 elif hasattr(cand_rec, "normalized_name"):
