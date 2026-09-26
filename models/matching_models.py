@@ -74,11 +74,18 @@ class PairRanker:
         )
         logger.info(f"PairRanker trained with {self.model.num_trees()} trees")
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Return match probabilities."""
+    def predict(self, X: np.ndarray, batch_size: int = 50000) -> np.ndarray:
+        """Return match probabilities with batching for large or memmapped arrays."""
         if self.model is None:
             raise RuntimeError("Model not trained. Call train() or load() first.")
-        return self.model.predict(X)
+        if len(X) == 0:
+            return np.empty((0,), dtype=np.float32)
+        if len(X) <= batch_size:
+            return self.model.predict(X)
+        preds = []
+        for i in range(0, len(X), batch_size):
+            preds.append(self.model.predict(X[i:i + batch_size]))
+        return np.concatenate(preds)
 
     def get_feature_importance(self) -> Dict[str, float]:
         """Get feature importance."""

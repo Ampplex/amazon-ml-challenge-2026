@@ -18,6 +18,8 @@ files_to_export = [
     'evaluation/f05.py',
     'utils/validate_submission.py',
     'utils/package_submission.py',
+    'tests/test_scaling_verification.py',
+    'tests/test_end_to_end_pipeline.py',
     'main.py',
     'requirements.txt',
     'Documentation_template.md',

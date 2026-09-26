@@ -8,7 +8,7 @@ Follows the exact competition evaluation criteria:
 """
 
 import logging
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 
@@ -292,3 +292,161 @@ def evaluate_candidate_recall_gate(
     }
 
     return result
+
+
+class IncrementalRecallGate:
+    """Incrementally computes 5-stage candidate recall gate diagnostics batch-by-batch.
+    
+    Consumes ~1 KB of RAM rather than accumulating millions of CandidatePair objects.
+    """
+
+    def __init__(self, ground_truth: Dict[str, List[str]]):
+        self.ground_truth = ground_truth
+        self.total_true_matches = 0
+        self.covered_matches = 0
+        self.covered_at_10 = 0
+        self.covered_at_20 = 0
+        self.covered_at_40 = 0
+        self.entities_with_gt = 0
+        self.entities_all_recovered = 0
+        self.entities_any_recovered = 0
+        self.post_channel_hits = {
+            "exact": 0,
+            "name_char_tfidf": 0,
+            "name_word_tfidf": 0,
+            "address_tfidf": 0,
+            "bm25": 0,
+            "name_ann": 0,
+            "address_ann": 0,
+            "record_ann": 0,
+        }
+        self.raw_channel_hits = {
+            "raw_exact": 0,
+            "raw_name_char_tfidf": 0,
+            "raw_name_word_tfidf": 0,
+            "raw_address_tfidf": 0,
+            "raw_bm25": 0,
+            "raw_name_ann": 0,
+            "raw_address_ann": 0,
+            "raw_record_ann": 0,
+        }
+        self.raw_covered_matches = 0
+        self.total_candidates_generated = 0
+        self.total_entities_processed = 0
+        self.has_raw = False
+
+    def update_batch(
+        self,
+        b_cands: Dict[str, List[Any]],
+        b_raw: Optional[Dict[str, List[Any]]] = None
+    ) -> None:
+        """Process one batch of candidate pairs incrementally and discard."""
+        if b_raw is not None:
+            self.has_raw = True
+
+        for s1_id, pairs in b_cands.items():
+            self.total_entities_processed += 1
+            true_list = self.ground_truth.get(s1_id, [])
+            true_set = set(true_list)
+            if not true_set:
+                continue
+            self.entities_with_gt += 1
+            self.total_true_matches += len(true_set)
+            self.total_candidates_generated += len(pairs)
+
+            cand_ids = [getattr(p, "candidate_id", p) for p in pairs]
+            recovered = true_set & set(cand_ids)
+            self.covered_matches += len(recovered)
+
+            if len(recovered) == len(true_set):
+                self.entities_all_recovered += 1
+            if len(recovered) > 0:
+                self.entities_any_recovered += 1
+
+            self.covered_at_10 += len(true_set & set(cand_ids[:10]))
+            self.covered_at_20 += len(true_set & set(cand_ids[:20]))
+            self.covered_at_40 += len(true_set & set(cand_ids[:40]))
+
+            for p in pairs:
+                cid = getattr(p, "candidate_id", p)
+                if cid in true_set:
+                    if getattr(p, "found_by_exact", False): self.post_channel_hits["exact"] += 1
+                    if getattr(p, "found_by_char_tfidf", False): self.post_channel_hits["name_char_tfidf"] += 1
+                    if getattr(p, "found_by_word_tfidf", False): self.post_channel_hits["name_word_tfidf"] += 1
+                    if getattr(p, "found_by_address_tfidf", False): self.post_channel_hits["address_tfidf"] += 1
+                    if getattr(p, "found_by_bm25", False): self.post_channel_hits["bm25"] += 1
+                    if getattr(p, "found_by_name_ann", False): self.post_channel_hits["name_ann"] += 1
+                    if getattr(p, "found_by_address_ann", False): self.post_channel_hits["address_ann"] += 1
+                    if getattr(p, "found_by_record_ann", False): self.post_channel_hits["record_ann"] += 1
+
+            if b_raw is not None and s1_id in b_raw:
+                raw_pairs = b_raw[s1_id]
+                raw_ids = [getattr(p, "candidate_id", p) for p in raw_pairs]
+                raw_recovered = true_set & set(raw_ids)
+                self.raw_covered_matches += len(raw_recovered)
+                for p in raw_pairs:
+                    cid = getattr(p, "candidate_id", p)
+                    if cid in true_set:
+                        if getattr(p, "found_by_exact", False): self.raw_channel_hits["raw_exact"] += 1
+                        if getattr(p, "found_by_char_tfidf", False): self.raw_channel_hits["raw_name_char_tfidf"] += 1
+                        if getattr(p, "found_by_word_tfidf", False): self.raw_channel_hits["raw_name_word_tfidf"] += 1
+                        if getattr(p, "found_by_address_tfidf", False): self.raw_channel_hits["raw_address_tfidf"] += 1
+                        if getattr(p, "found_by_bm25", False): self.raw_channel_hits["raw_bm25"] += 1
+                        if getattr(p, "found_by_name_ann", False): self.raw_channel_hits["raw_name_ann"] += 1
+                        if getattr(p, "found_by_address_ann", False): self.raw_channel_hits["raw_address_ann"] += 1
+                        if getattr(p, "found_by_record_ann", False): self.raw_channel_hits["raw_record_ann"] += 1
+
+    def compute_summary(self, country_filter_hits: int = 0) -> Dict:
+        """Compute the final 5-stage recall metrics dictionary."""
+        recall_ceiling = (self.covered_matches / self.total_true_matches) if self.total_true_matches > 0 else 1.0
+        r_at_10 = (self.covered_at_10 / self.total_true_matches) if self.total_true_matches > 0 else 1.0
+        r_at_20 = (self.covered_at_20 / self.total_true_matches) if self.total_true_matches > 0 else 1.0
+        r_at_40 = (self.covered_at_40 / self.total_true_matches) if self.total_true_matches > 0 else 1.0
+
+        pct_all_recovered = (self.entities_all_recovered / self.entities_with_gt) if self.entities_with_gt > 0 else 1.0
+        pct_any_recovered = (self.entities_any_recovered / self.entities_with_gt) if self.entities_with_gt > 0 else 1.0
+
+        post_channel_rec = {
+            ch: (hits / self.total_true_matches) if self.total_true_matches > 0 else 1.0
+            for ch, hits in self.post_channel_hits.items()
+        }
+
+        raw_ceiling = (self.raw_covered_matches / self.total_true_matches) if (self.has_raw and self.total_true_matches > 0) else recall_ceiling
+        raw_channel_rec = {
+            ch: (hits / self.total_true_matches) if self.total_true_matches > 0 else 1.0
+            for ch, hits in self.raw_channel_hits.items()
+        } if self.has_raw else post_channel_rec
+        retention = (self.covered_matches / self.raw_covered_matches) if (self.has_raw and self.raw_covered_matches > 0) else 1.0
+
+        return {
+            "recall_ceiling": recall_ceiling,
+            "recall_at_10": r_at_10,
+            "recall_at_20": r_at_20,
+            "recall_at_40": r_at_40,
+            "pct_entities_all_recovered": pct_all_recovered,
+            "pct_entities_any_recovered": pct_any_recovered,
+            "channel_recovery": post_channel_rec,
+            "total_true_matches": self.total_true_matches,
+            "covered_matches": self.covered_matches,
+            "avg_candidates": self.total_candidates_generated / max(self.total_entities_processed, 1),
+            "raw_recall_ceiling": raw_ceiling,
+            "raw_channel_recovery": raw_channel_rec,
+            "quota_retention_rate": retention,
+            "country_filter_hits": country_filter_hits,
+            "stages": {
+                "stage_A_raw_channels": raw_channel_rec,
+                "stage_B_country_filter": {
+                    "cross_country_prevented": country_filter_hits,
+                    "country_filter_match_loss_rate": 0.0,
+                },
+                "stage_C_pre_rrf_union": raw_ceiling,
+                "stage_D_post_rrf_ranking": recall_ceiling,
+                "stage_E_post_quota_final": {
+                    "recall_ceiling": recall_ceiling,
+                    "recall_at_40": r_at_40,
+                    "recall_at_20": r_at_20,
+                    "recall_at_10": r_at_10,
+                    "quota_retention_rate": retention,
+                },
+            },
+        }

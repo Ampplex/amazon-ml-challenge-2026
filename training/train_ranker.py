@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from evaluation.f05 import compute_macro_f05, evaluate_blocking_quality, evaluate_candidate_recall_gate
+from evaluation.f05 import compute_macro_f05, evaluate_blocking_quality, evaluate_candidate_recall_gate, IncrementalRecallGate
 from features.feature_engineering import FeatureEngine
 from models.matching_models import (
     PairRanker,
@@ -53,12 +53,121 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class DiskFeatureBuffer:
-    """Buffers PairFeatures objects, transforms them to numpy arrays, and saves to chunked .npz files on disk."""
+class BinaryFeatureBuffer:
+    """Streams PairFeatures objects directly to raw binary files on disk and exposes np.memmap views.
 
-    def __init__(self, cache_dir: str, prefix: str, feature_engine: FeatureEngine, chunk_size: int = 25000):
+    Eliminates in-memory np.vstack() allocations and multi-gigabyte RAM spikes.
+    """
+
+    def __init__(
+        self,
+        cache_dir: str,
+        prefix: str,
+        feature_engine: FeatureEngine,
+        chunk_size: int = 25000,
+        store_ids: bool = False
+    ):
         self.cache_dir = cache_dir
         self.prefix = prefix
+        self.feature_engine = feature_engine
+        self.chunk_size = chunk_size
+        self.store_ids = store_ids
+        self.buffer = []
+        self.total_pairs = 0
+        self.n_features = len(feature_engine.get_feature_names())
+
+        self.x_path = os.path.join(cache_dir, f"{prefix}_X.bin")
+        self.y_path = os.path.join(cache_dir, f"{prefix}_y.bin")
+        self.ids_path = os.path.join(cache_dir, f"{prefix}_ids.tsv")
+
+        for p in [self.x_path, self.y_path, self.ids_path]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    def add(self, pf) -> None:
+        self.buffer.append(pf)
+        if len(self.buffer) >= self.chunk_size:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.buffer:
+            return
+        X_chunk, s1_chunk, cand_chunk, y_chunk = self.feature_engine.features_to_arrays(self.buffer)
+        self.append_arrays(X_chunk, y_chunk, s1_chunk, cand_chunk)
+        self.buffer = []
+        gc.collect()
+
+    def append_arrays(
+        self,
+        X_arr: np.ndarray,
+        y_arr: np.ndarray,
+        s1_ids: Optional[List[str]] = None,
+        cand_ids: Optional[List[str]] = None
+    ) -> None:
+        if len(y_arr) == 0:
+            return
+        if self.n_features == 0 and X_arr.ndim == 2 and X_arr.shape[1] > 0:
+            self.n_features = X_arr.shape[1]
+        with open(self.x_path, "ab") as fx:
+            X_arr.astype(np.float32).tofile(fx)
+        with open(self.y_path, "ab") as fy:
+            y_arr.astype(np.int32).tofile(fy)
+        if self.store_ids and s1_ids is not None and cand_ids is not None:
+            with open(self.ids_path, "a", encoding="utf-8") as f_ids:
+                for s1, c in zip(s1_ids, cand_ids):
+                    f_ids.write(f"{s1}\t{c}\n")
+        self.total_pairs += len(y_arr)
+
+    def get_memmap(self) -> Tuple[np.ndarray, np.ndarray]:
+        self.flush()
+        if (
+            self.total_pairs == 0
+            or self.n_features == 0
+            or not os.path.exists(self.x_path)
+            or not os.path.exists(self.y_path)
+            or os.path.getsize(self.x_path) == 0
+            or os.path.getsize(self.y_path) == 0
+        ):
+            return (
+                np.empty((0, self.n_features), dtype=np.float32),
+                np.empty((0,), dtype=np.int32)
+            )
+        X_mmap = np.memmap(
+            self.x_path,
+            dtype=np.float32,
+            mode="r",
+            shape=(self.total_pairs, self.n_features)
+        )
+        y_mmap = np.memmap(
+            self.y_path,
+            dtype=np.int32,
+            mode="r",
+            shape=(self.total_pairs,)
+        )
+        return X_mmap, y_mmap
+
+    def get_ids(self) -> Tuple[List[str], List[str]]:
+        self.flush()
+        if not os.path.exists(self.ids_path):
+            return [], []
+        s1_list, cand_list = [], []
+        with open(self.ids_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 2:
+                    s1_list.append(parts[0])
+                    cand_list.append(parts[1])
+        return s1_list, cand_list
+
+
+class UnminedChunkBuffer:
+    """Buffers unmined candidate pairs into chunked .npz files on disk for streaming hard-negative mining."""
+
+    def __init__(self, cache_dir: str, feature_engine: FeatureEngine, chunk_size: int = 25000):
+        self.cache_dir = cache_dir
         self.feature_engine = feature_engine
         self.chunk_size = chunk_size
         self.buffer = []
@@ -75,7 +184,7 @@ class DiskFeatureBuffer:
             return
         X_chunk, s1_chunk, cand_chunk, y_chunk = self.feature_engine.features_to_arrays(self.buffer)
         chunk_idx = len(self.chunk_paths)
-        chunk_path = os.path.join(self.cache_dir, f"{self.prefix}_chunk_{chunk_idx}.npz")
+        chunk_path = os.path.join(self.cache_dir, f"unmined_chunk_{chunk_idx}.npz")
         np.savez_compressed(
             chunk_path,
             X=X_chunk,
@@ -87,20 +196,6 @@ class DiskFeatureBuffer:
         self.total_pairs += len(y_chunk)
         self.buffer = []
         gc.collect()
-
-    def load_all(self) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
-        self.flush()
-        if not self.chunk_paths:
-            n_features = len(self.feature_engine.get_feature_names())
-            return np.empty((0, n_features), dtype=np.float32), np.empty((0,), dtype=np.int32), [], []
-        X_list, y_list, s1_list, cand_list = [], [], [], []
-        for p in self.chunk_paths:
-            data = np.load(p, allow_pickle=True)
-            X_list.append(data["X"])
-            y_list.append(data["y"])
-            s1_list.extend([str(s) for s in data["s1_ids"]])
-            cand_list.extend([str(c) for c in data["cand_ids"]])
-        return np.vstack(X_list), np.concatenate(y_list), s1_list, cand_list
 
 
 def run_training(
@@ -179,17 +274,16 @@ def run_training(
     if dense_cfg.get("enabled", True):
         embedding_gen = EmbeddingGenerator(model_name=dense_model_name)
 
-    # Disk buffers for feature arrays
-    train_buffer = DiskFeatureBuffer(cache_dir, "train", feature_engine)
-    cal_buffer = DiskFeatureBuffer(cache_dir, "cal", feature_engine)
-    holdout_buffer = DiskFeatureBuffer(cache_dir, "holdout", feature_engine)
-    unmined_buffer = DiskFeatureBuffer(cache_dir, "unmined", feature_engine)
+    # Binary buffers for feature arrays (zero in-memory vstack RAM bloat)
+    train_buffer = BinaryFeatureBuffer(cache_dir, "train", feature_engine, store_ids=False)
+    cal_buffer = BinaryFeatureBuffer(cache_dir, "cal", feature_engine, store_ids=True)
+    holdout_buffer = BinaryFeatureBuffer(cache_dir, "holdout", feature_engine, store_ids=True)
+    unmined_buffer = UnminedChunkBuffer(cache_dir, feature_engine)
 
     # Candidate text cache for selective Cross-Encoder reranking (stores norm_name, norm_addr)
     cand_text_cache: Dict[str, Tuple[str, str]] = {}
 
-    holdout_candidates_for_gate = {}
-    raw_holdout_for_gate = {}
+    recall_gate = IncrementalRecallGate(holdout_gt)
     total_country_filter_hits = 0
 
     # Determine unique country partitions present in S1
@@ -234,7 +328,7 @@ def run_training(
         normalize_all_addresses(cand_partition, config)
 
         cand_gen = CandidateGenerator(config, embedding_gen=embedding_gen)
-        cand_gen.setup(p_s1, p_s2, p_s3, build_dense_index=True)
+        cand_gen.setup(p_s1, candidate_records=cand_partition, build_dense_index=True)
 
         # 5a. Stream Train Candidates into Disk Buffer
         if p_train_s1:
@@ -278,8 +372,7 @@ def run_training(
         # 5c. Stream Holdout Candidates into Disk Buffer + Recall Gate
         if p_holdout_s1:
             for b_cands, b_raw in cand_gen.iter_candidate_batches(p_holdout_s1, batch_size=2048, return_raw=True):
-                holdout_candidates_for_gate.update(b_cands)
-                raw_holdout_for_gate.update(b_raw)
+                recall_gate.update_batch(b_cands, b_raw)
                 for s1_id, clist in b_cands.items():
                     true_set = set(holdout_gt.get(s1_id, []))
                     s1_rec = p_holdout_s1[s1_id]
@@ -302,34 +395,31 @@ def run_training(
 
     # 6. Formal 5-Stage Candidate Recall Gate
     logger.info("=== STEP 6: Formal 5-Stage Candidate Recall Gate (Holdout Set) ===")
-    recall_gate = evaluate_candidate_recall_gate(
-        holdout_candidates_for_gate, holdout_gt,
-        raw_candidates_dict=raw_holdout_for_gate,
-        country_filter_hits=total_country_filter_hits
-    )
-    del holdout_candidates_for_gate, raw_holdout_for_gate
+    recall_gate_report = recall_gate.compute_summary(country_filter_hits=total_country_filter_hits)
     gc.collect()
 
     logger.info("--------------------------------------------------")
     logger.info("--- 5-STAGE CANDIDATE RECALL GATE REPORT ---")
-    logger.info(f"  Stage A (Raw Channels):      {len(recall_gate.get('raw_channel_recovery', {}))} channels active")
+    logger.info(f"  Stage A (Raw Channels):      {len(recall_gate_report.get('raw_channel_recovery', {}))} channels active")
     logger.info(f"  Stage B (Country Filter):    {total_country_filter_hits:,} cross-country pairs prevented (0.0% match loss)")
-    logger.info(f"  Stage C (Pre-RRF Union):     {recall_gate['raw_recall_ceiling']*100:.2f}%")
-    logger.info(f"  Stage D (Post-RRF Ceiling):  {recall_gate['recall_ceiling']*100:.2f}%")
-    logger.info(f"  Stage E (Post-Quota Final):  Recall@40={recall_gate['recall_at_40']*100:.2f}%, "
-                f"Recall@20={recall_gate['recall_at_20']*100:.2f}%, Recall@10={recall_gate['recall_at_10']*100:.2f}%")
-    logger.info(f"  Quota Retention Rate:        {recall_gate['quota_retention_rate']*100:.2f}%")
-    logger.info(f"  Entities 100% Recovered:     {recall_gate['pct_entities_all_recovered']*100:.2f}%")
-    logger.info(f"  Entities Any Recovered:      {recall_gate['pct_entities_any_recovered']*100:.2f}%")
-    logger.info(f"  Avg Candidates per Entity:   {recall_gate['avg_candidates']:.1f}")
+    logger.info(f"  Stage C (Pre-RRF Union):     {recall_gate_report['raw_recall_ceiling']*100:.2f}%")
+    logger.info(f"  Stage D (Post-RRF Ceiling):  {recall_gate_report['recall_ceiling']*100:.2f}%")
+    logger.info(f"  Stage E (Post-Quota Final):  Recall@40={recall_gate_report['recall_at_40']*100:.2f}%, "
+                f"Recall@20={recall_gate_report['recall_at_20']*100:.2f}%, Recall@10={recall_gate_report['recall_at_10']*100:.2f}%")
+    logger.info(f"  Quota Retention Rate:        {recall_gate_report['quota_retention_rate']*100:.2f}%")
+    logger.info(f"  Entities 100% Recovered:     {recall_gate_report['pct_entities_all_recovered']*100:.2f}%")
+    logger.info(f"  Entities Any Recovered:      {recall_gate_report['pct_entities_any_recovered']*100:.2f}%")
+    logger.info(f"  Avg Candidates per Entity:   {recall_gate_report['avg_candidates']:.1f}")
     logger.info("--------------------------------------------------")
 
-    # 7. Materialize Feature Arrays from Disk Chunks
-    logger.info("=== STEP 7: Loading Feature Arrays from Disk Chunks ===")
-    X_train, y_train, tr_s1, tr_cand = train_buffer.load_all()
-    X_val, y_val, v_s1, v_cand = cal_buffer.load_all()
-    X_cal_all, c_s1_all, c_cand_all, y_cal_all = X_val, v_s1, v_cand, y_val
-    X_holdout_all, y_holdout_all, h_s1_all, h_cand_all = holdout_buffer.load_all()
+    # 7. Materialize Feature Arrays via np.memmap (Zero RAM Duplication)
+    logger.info("=== STEP 7: Exposing Feature Arrays via np.memmap ===")
+    X_train, y_train = train_buffer.get_memmap()
+    X_val, y_val = cal_buffer.get_memmap()
+    X_cal_all, y_cal_all = X_val, y_val
+    c_s1_all, c_cand_all = cal_buffer.get_ids()
+    X_holdout_all, y_holdout_all = holdout_buffer.get_memmap()
+    h_s1_all, h_cand_all = holdout_buffer.get_ids()
 
     feature_names = feature_engine.get_feature_names()
     logger.info(f"Train array shape:   {X_train.shape} (Pos: {int((y_train==1).sum())}, Neg: {int((y_train==0).sum())})")
@@ -364,11 +454,9 @@ def run_training(
                 logger.info("No further high-confidence false positives found in candidate pool.")
                 break
 
-            X_train = np.vstack([X_train, X_extra])
-            y_train = np.concatenate([y_train, y_extra])
-            tr_s1.extend(extra_s1)
-            tr_cand.extend(extra_cand)
-            logger.info(f"Augmented training pool to {len(y_train):,} pairs. Retraining ranker...")
+            train_buffer.append_arrays(X_extra, y_extra)
+            X_train, y_train = train_buffer.get_memmap()
+            logger.info(f"Augmented training pool to {len(y_train):,} pairs (appended directly to disk binary buffer). Retraining ranker...")
             ranker.train(X_train, y_train, X_val, y_val, feature_names=feature_names)
 
     # 10. Score Calibration Set & Selective Cross-Encoder Reranking
@@ -480,7 +568,7 @@ def run_training(
             "calibration": len(cal_s1_ids),
             "holdout": len(holdout_s1_ids),
         },
-        "candidate_recall_gate": recall_gate,
+        "candidate_recall_gate": recall_gate_report,
         "holdout_results": final_metrics,
         "optimal_threshold": best_threshold,
         "features_count": len(feature_names),

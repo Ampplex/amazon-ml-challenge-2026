@@ -168,13 +168,14 @@ def run_inference(
 
         # 3. Normalization & Parsing for this partition
         cand_records = {**s2_records, **s3_records}
-        partition_records = {**s1_records, **cand_records}
-        normalize_all_names(partition_records, config)
-        normalize_all_addresses(partition_records, config)
+        normalize_all_names(s1_records, config)
+        normalize_all_names(cand_records, config)
+        normalize_all_addresses(s1_records, config)
+        normalize_all_addresses(cand_records, config)
 
         # 4. Multi-Channel Candidate Generation & Dense Embeddings
         cand_gen = CandidateGenerator(config, embedding_gen=embedding_gen)
-        cand_gen.setup(s1_records, s2_records, s3_records, build_dense_index=True)
+        cand_gen.setup(s1_records, candidate_records=cand_records, build_dense_index=True)
 
         # Clear embeddings cache to use direct CandidatePair semantic scores
         feature_engine.set_embeddings_cache(None)
@@ -204,8 +205,8 @@ def run_inference(
             if flat_pairs:
                 pf_list = []
                 for s1_id, cand_id, pair_meta in flat_pairs:
-                    s1_rec = partition_records.get(s1_id)
-                    c_rec = partition_records.get(cand_id)
+                    s1_rec = s1_records.get(s1_id)
+                    c_rec = cand_records.get(cand_id)
                     if s1_rec and c_rec:
                         pf = feature_engine.compute_pair_features(s1_rec, c_rec, pair_meta)
                         pf_list.append(pf)
@@ -224,7 +225,7 @@ def run_inference(
                         amb_dict = cross_encoder.identify_ambiguous(batch_cand_scores)
                         amb_pairs = [(s1, c) for s1, cs in amb_dict.items() for c in cs]
                         if amb_pairs:
-                            ce_scores_dict = cross_encoder.rerank(amb_pairs, partition_records, partition_records)
+                            ce_scores_dict = cross_encoder.rerank(amb_pairs, s1_records, cand_records)
 
                     # Score fusion & calibration
                     for s1_id, cand_id, score in zip(b_s1_names, b_cand_names, raw_preds):
@@ -261,7 +262,7 @@ def run_inference(
             logger.info(f"Progress ({country.upper()}): {total_processed_s1:,} / {len(s1_all_ids):,} S1 entities done...")
 
         # Free partition memory
-        del s1_records, s2_records, s3_records, cand_records, partition_records, cand_gen
+        del s1_records, s2_records, s3_records, cand_records, cand_gen
         gc.collect()
 
     logger.info("==================================================")

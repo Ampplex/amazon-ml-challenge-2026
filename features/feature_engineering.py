@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 
 from preprocessing.schema import Record, CandidatePair, PairFeatures
+from preprocessing.normalize_names import extract_normalized_name_tokens
+from preprocessing.normalize_addresses import extract_normalized_address_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +321,7 @@ class RarityFeatureComputer:
                 addrs = chunk["business_address"].values
                 for n_val, a_val in zip(names, addrs):
                     self.total_docs += 1
-                    toks = set(re.findall(r"\w+", (n_val + " " + a_val).lower()))
+                    toks = set(extract_normalized_name_tokens(n_val)) | set(extract_normalized_address_tokens(a_val))
                     for t in toks:
                         self.token_df[t] += 1
 

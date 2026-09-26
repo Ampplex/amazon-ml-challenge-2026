@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-We present a scalable, two-stage **Retrieval-Matching Architecture** designed specifically for the Amazon ML Challenge 2026 Business Entity Resolution task. Our system pairs an 8-channel candidate generation pipeline (Multi-Key Deterministic Exact Blocking + Character n-gram TF-IDF for Names + Word n-gram TF-IDF for Names + Character n-gram TF-IDF for Addresses + BM25 Token Retrieval + Dense Semantic ANN via FAISS IVFFlat across Name, Address, and Record representations) with Reciprocal Rank Fusion (RRF) and source-aware candidate compression ($S_2 \le 20, S_3 \le 20$, total $\le 40$). This dramatically compresses the search space while safeguarding recall. A calibrated LightGBM classifier evaluates over 60 lexical, structural, token rarity (IDF), semantic cosine, and continuous retrieval similarity features, augmented by selective multilingual cross-encoder reranking on ambiguous pairs. Final entity-level decisions are optimized directly for macro-averaged $F_{0.5}$ via isotonic probability calibration to strongly prioritize precision and singleton discrimination.
+We present a scalable, two-stage **Retrieval-Matching Architecture** designed specifically for the Amazon ML Challenge 2026 Business Entity Resolution task. Our system pairs an 8-channel candidate generation pipeline (Multi-Key Deterministic Exact Blocking + Character n-gram TF-IDF for Names + Word n-gram TF-IDF for Names + Character n-gram TF-IDF for Addresses + BM25 Token Retrieval + Dense Semantic ANN via FAISS IndexIVFPQ across Name, Address, and Record representations) with Reciprocal Rank Fusion (RRF) and source-aware candidate compression ($S_2 \le 20, S_3 \le 20$, total $\le 40$). This dramatically compresses the search space while safeguarding recall. A calibrated LightGBM classifier evaluates over 60 lexical, structural, token rarity (IDF), semantic cosine, and continuous retrieval similarity features, augmented by selective multilingual cross-encoder reranking on ambiguous pairs. Final entity-level decisions are optimized directly for macro-averaged $F_{0.5}$ via isotonic probability calibration to strongly prioritize precision and singleton discrimination.
 
 ---
 
@@ -26,7 +26,7 @@ Key insights discovered during exploratory data analysis:
 ### 2.2 Solution Strategy
 We divide the resolution task into decoupled, modular stages:
 1. **Normalization & Canonical Schema**: Clean text into normalized tokens, extract structural components (postal code, house number, road, city, state, landmark), and handle multilingual variants.
-2. **8-Channel Retrieval**: Broad candidate discovery across exact blocking, sparse TF-IDF, BM25, and dense multilingual SentenceTransformers vectors indexed in FAISS IVFFlat.
+2. **8-Channel Retrieval**: Broad candidate discovery across exact blocking, sparse TF-IDF, BM25, and dense multilingual SentenceTransformers vectors indexed in FAISS IndexIVFPQ.
 3. **Source-Aware Compression**: Combine rankings using Reciprocal Rank Fusion (RRF), enforce source quotas ($S_2 \le 20, S_3 \le 20$), and cap at top-40 candidates per S1 entity.
 4. **Feature Extraction**: Transform candidate pairs into 60+ dimensional feature vectors incorporating lexical distances, component overlaps, global IDF token rarities, semantic embeddings, and continuous retrieval similarities.
 5. **Discriminative Pair Scoring**: LightGBM gradient boosted decision trees trained with multi-round hard-negative mining on the full candidate pool.

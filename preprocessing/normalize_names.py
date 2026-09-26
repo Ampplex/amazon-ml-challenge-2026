@@ -235,3 +235,15 @@ def normalize_all_names(records: Dict[str, Record], config: dict = None) -> Dict
         normalize_name(record, config)
     logger.info(f"Normalized names for {len(records)} records")
     return records
+
+
+def extract_normalized_name_tokens(name: str) -> List[str]:
+    """Tokenize and normalize name string matching exact pipeline."""
+    if not name or not str(name).strip():
+        return []
+    text = _unicode_normalize(str(name)).lower()
+    text = _normalize_punctuation(text)
+    text = _normalize_whitespace(text)
+    tokens = text.split()
+    return _expand_abbreviations(tokens)
+

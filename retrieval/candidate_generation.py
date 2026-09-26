@@ -427,11 +427,15 @@ class CandidateGenerator:
             del b_embs, b_recs
 
     def setup(self, s1_records: Dict[str, Record],
-              s2_records: Dict[str, Record],
-              s3_records: Dict[str, Record],
+              s2_records: Optional[Dict[str, Record]] = None,
+              s3_records: Optional[Dict[str, Record]] = None,
+              candidate_records: Optional[Dict[str, Record]] = None,
               build_dense_index: bool = True) -> None:
         """Initialize all retrieval channels across candidate records."""
-        self.all_candidate_records = {**s2_records, **s3_records}
+        if candidate_records is not None:
+            self.all_candidate_records = candidate_records
+        else:
+            self.all_candidate_records = {**(s2_records or {}), **(s3_records or {})}
 
         logger.info("Setting up multi-channel retrieval...")
         self.exact_blocker.build_index(self.all_candidate_records)

@@ -276,3 +276,15 @@ def normalize_all_addresses(records: Dict[str, Record], config: dict = None) -> 
         normalize_address(record, config)
     logger.info(f"Normalized addresses for {len(records)} records")
     return records
+
+
+def extract_normalized_address_tokens(address: str) -> List[str]:
+    """Tokenize and normalize address string matching exact pipeline."""
+    if not address or not str(address).strip():
+        return []
+    text = _unicode_normalize_address(str(address)).lower()
+    text = _normalize_punctuation_address(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    tokens = text.split()
+    return _expand_address_abbreviations(tokens)
+

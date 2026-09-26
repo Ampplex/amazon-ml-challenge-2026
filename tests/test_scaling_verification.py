@@ -257,6 +257,71 @@ class TestScalingAndComponents(unittest.TestCase):
             else:
                 self.assertIn(target_id, retrieved_ids, f"{case_name}: Expected target {target_id} in {retrieved_ids}")
 
+    def test_10_incremental_recall_gate_and_binary_buffer(self):
+        """Verify IncrementalRecallGate streaming parity and BinaryFeatureBuffer memmap persistence."""
+        from evaluation.f05 import IncrementalRecallGate
+        from training.train_ranker import BinaryFeatureBuffer
+
+        gt = {
+            "S1-1": ["S2-1", "S3-1"],
+            "S1-2": ["S2-2"],
+        }
+        candidates = {
+            "S1-1": [CandidatePair(s1_id="S1-1", candidate_id="S2-1", found_by_exact=True, found_by_char_tfidf=True)],
+            "S1-2": [CandidatePair(s1_id="S1-2", candidate_id="S2-2", found_by_bm25=True)],
+        }
+        raw_candidates = {
+            "S1-1": [
+                CandidatePair(s1_id="S1-1", candidate_id="S2-1", found_by_exact=True),
+                CandidatePair(s1_id="S1-1", candidate_id="S3-1", found_by_name_ann=True),
+            ],
+            "S1-2": [CandidatePair(s1_id="S1-2", candidate_id="S2-2", found_by_bm25=True)],
+        }
+
+        # Direct evaluation
+        full_gate = evaluate_candidate_recall_gate(candidates, gt, raw_candidates_dict=raw_candidates, country_filter_hits=5)
+
+        # Incremental evaluation
+        inc_gate = IncrementalRecallGate(gt)
+        inc_gate.update_batch(
+            {"S1-1": candidates["S1-1"]},
+            {"S1-1": raw_candidates["S1-1"]}
+        )
+        inc_gate.update_batch(
+            {"S1-2": candidates["S1-2"]},
+            {"S1-2": raw_candidates["S1-2"]}
+        )
+        inc_report = inc_gate.compute_summary(country_filter_hits=5)
+
+        self.assertEqual(full_gate["recall_ceiling"], inc_report["recall_ceiling"])
+        self.assertEqual(full_gate["recall_at_40"], inc_report["recall_at_40"])
+        self.assertEqual(full_gate["quota_retention_rate"], inc_report["quota_retention_rate"])
+        self.assertEqual(full_gate["stages"]["stage_C_pre_rrf_union"], inc_report["stages"]["stage_C_pre_rrf_union"])
+
+        # Test BinaryFeatureBuffer
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fe = FeatureEngine(self.config)
+            fe.setup({})
+            buf = BinaryFeatureBuffer(tmpdir, "test", fe, store_ids=True)
+            X_fake = np.ones((10, 50), dtype=np.float32) * 3.5
+            y_fake = np.array([1, 0, 1, 0, 1, 0, 1, 0, 1, 0], dtype=np.int32)
+            s1_ids = [f"s1_{i}" for i in range(10)]
+            c_ids = [f"c_{i}" for i in range(10)]
+
+            buf.append_arrays(X_fake, y_fake, s1_ids, c_ids)
+
+            X_mmap, y_mmap = buf.get_memmap()
+            self.assertEqual(X_mmap.shape, (10, 50))
+            self.assertEqual(len(y_mmap), 10)
+            self.assertAlmostEqual(float(X_mmap[0, 0]), 3.5, places=4)
+            self.assertEqual(int(y_mmap[0]), 1)
+            self.assertEqual(int(y_mmap[1]), 0)
+
+            out_s1, out_c = buf.get_ids()
+            self.assertEqual(out_s1, s1_ids)
+            self.assertEqual(out_c, c_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
+
