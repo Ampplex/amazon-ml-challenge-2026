@@ -1,0 +1,189 @@
+# =============================================================================
+# Amazon ML Challenge 2026 — Business Entity Resolution Pipeline Configuration
+# =============================================================================
+
+# --- Paths ---
+paths:
+  base_dir: "."
+  train_dir: "dataset/train"
+  test_dir: "dataset/test"
+  output_dir: "outputs"
+  model_dir: "models/saved"
+  index_dir: "models/indexes"
+  cache_dir: "models/cache"
+
+  # Training files
+  train_source1: "dataset/train/train_source1.tsv"
+  train_source2: "dataset/train/train_source2.tsv"
+  train_source3: "dataset/train/train_source3.tsv"
+  train_ground_truth: "dataset/train/train_ground_truth.tsv"
+
+  # Test files
+  test_source1: "dataset/test/test_source1.tsv"
+  test_source2: "dataset/test/test_source2.tsv"
+  test_source3: "dataset/test/test_source3.tsv"
+
+  # Output files
+  matching_results: "outputs/matching_results.tsv"
+  candidate_pairs: "outputs/candidate_pairs.tsv"
+
+# --- Normalization ---
+normalization:
+  name:
+    lowercase: true
+    unicode_normalize: true  # NFKD
+    strip_punctuation: true
+    normalize_whitespace: true
+    expand_abbreviations: true
+    remove_legal_suffixes: false  # Keep but normalize (Ltd->Limited etc.)
+    char_ngram_range: [3, 4]
+
+  address:
+    lowercase: true
+    unicode_normalize: true
+    expand_abbreviations: true
+    extract_components: true
+    normalize_whitespace: true
+    numeric_extraction: true
+
+# --- Retrieval ---
+retrieval:
+  filter_country_mismatch: true
+
+  # Exact blocking
+  exact_blocking:
+    enabled: true
+
+  # TF-IDF
+  tfidf:
+    enabled: true
+    name_char_ngram_range: [3, 4]
+    name_word_ngram_range: [1, 2]
+    address_char_ngram_range: [3, 4]
+    max_features: 50000
+    top_k: 30
+    tfidf_query_warn_ms: 100.0
+
+  # BM25
+  bm25:
+    enabled: true
+    k1: 1.5
+    b: 0.75
+    top_k: 30
+
+  # Dense ANN (embedding-based FAISS IndexIVFPQ)
+  dense_ann:
+    enabled: true
+    model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Apache 2.0, 50+ languages
+    batch_size: 256
+    name_top_k: 20
+    address_top_k: 20
+    record_top_k: 20
+    dimension: 384
+    index_type: "ivfpq"
+    nlist: 4096
+    nprobe: 16
+    pq_m: 32
+    pq_nbits: 8
+    training_sample_size: 100000
+
+# --- Candidate Compression ---
+candidate_compression:
+  enabled: true
+  # Reciprocal Rank Fusion
+  rrf:
+    enabled: true
+    k: 60  # RRF constant
+  # Source-aware candidate quotas to ensure S2 does not crowd out S3
+  s2_max_candidates: 20
+  s3_max_candidates: 20
+  # Final candidate limit per S1 entity (tight, high-ranking candidate set)
+  max_candidates_per_entity: 40
+  # Minimum retrieval votes to keep
+  min_retrieval_votes: 1
+
+# --- Feature Engineering ---
+features:
+  lexical:
+    enabled: true
+  semantic:
+    enabled: true
+  structural:
+    enabled: true
+  rarity:
+    enabled: true
+  retrieval:
+    enabled: true
+  graph:
+    enabled: false  # Optional, enable if needed
+
+# --- Pair Model (LightGBM) ---
+pair_model:
+  type: "lightgbm"
+  params:
+    objective: "binary"
+    metric: "binary_logloss"
+    boosting_type: "gbdt"
+    num_leaves: 127
+    max_depth: -1
+    learning_rate: 0.05
+    n_estimators: 1000
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    min_child_samples: 20
+    class_weight: "balanced"
+    verbose: -1
+  early_stopping_rounds: 50
+
+# --- Cross-Encoder (selective reranker) ---
+cross_encoder:
+  enabled: true
+  model_name: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # Multilingual mMARCO (14+ languages including French & Hindi transliterations)
+  batch_size: 64
+  # Global and per-batch compute budget
+  max_rerank_pairs_per_batch: 4096
+  max_rerank_pairs_total: 1000000
+  max_rerank_fraction_per_batch: 0.05
+  # Ambiguity detection thresholds
+  ambiguity:
+    score_band_low: 0.3
+    score_band_high: 0.8
+    margin_threshold: 0.15
+    max_candidates_for_rerank: 10
+
+# --- Fusion Model ---
+fusion_model:
+  type: "weighted_average"
+  pair_ranker_weight: 0.4
+  cross_encoder_weight: 0.6
+
+# --- Calibration ---
+calibration:
+  method: "isotonic"  # "isotonic" or "platt"
+
+# --- Decision ---
+decision:
+  # F0.5 threshold search range (broad search across full probability spectrum)
+  threshold_search:
+    start: 0.00
+    stop: 1.00
+    step: 0.01
+  # Default threshold (overridden by optimization)
+  default_threshold: 0.5
+
+# --- Training ---
+training:
+  validation_split: 0.2
+  random_seed: 42
+  hard_negative_mining:
+    enabled: true
+    iterations: 2
+    score_threshold: 0.35
+    top_k_hard_negatives: 5
+
+# --- Logging ---
+logging:
+  level: "INFO"
+  log_file: "pipeline.log"
