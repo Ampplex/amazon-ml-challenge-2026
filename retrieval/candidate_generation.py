@@ -68,33 +68,33 @@ class ExactBlocker:
 
             if country and postal:
                 l = idx_cp[f"{country}|{postal}"]
-                if len(l) < 50:
+                if len(l) < 25:
                     l.append(rid)
             if postal and tokens:
                 l = idx_pn[f"{postal}|{tokens[0]}"]
-                if len(l) < 50:
+                if len(l) < 25:
                     l.append(rid)
             if country and len(tokens) >= 2:
                 l = idx_tokens[f"{country}|{tokens[0]}|{tokens[1]}"]
-                if len(l) < 50:
+                if len(l) < 25:
                     l.append(rid)
             elif country and len(tokens) == 1:
                 l = idx_tokens[f"{country}|{tokens[0]}"]
-                if len(l) < 50:
+                if len(l) < 25:
                     l.append(rid)
             if country and compact and len(compact) >= 5:
                 l = idx_cnp[f"{country}|{compact[:5]}"]
-                if len(l) < 50:
+                if len(l) < 25:
                     l.append(rid)
             if country and nums and tokens:
                 l = idx_num_tok[f"{country}|{nums[0]}|{tokens[0]}"]
-                if len(l) < 50:
+                if len(l) < 25:
                     l.append(rid)
             if country:
                 for t in tokens:
                     if len(t) >= 4 and t not in self.stop_words:
                         l = idx_distinctive[f"{country}|{t}"]
-                        if len(l) < 50:
+                        if len(l) < 25:
                             l.append(rid)
 
         self.indexes = {
@@ -186,13 +186,16 @@ class TFIDFRetriever:
             else:
                 ngram_range = tuple(tfidf_cfg.get("name_word_ngram_range", [1, 2]))
 
+        max_df = 0.25 if analyzer == "char_wb" else 0.50
         self.vectorizer = TfidfVectorizer(
             analyzer=analyzer,
             ngram_range=ngram_range,
-            max_features=tfidf_cfg.get("max_features", 50000),
+            max_features=tfidf_cfg.get("max_features", 25000),
             dtype=np.float32,
             sublinear_tf=True,
             norm="l2",
+            min_df=2,
+            max_df=max_df,
         )
         self.matrix = None
         self.id_list: List[str] = []
@@ -218,8 +221,11 @@ class TFIDFRetriever:
         vocab_sample_size = min(len(texts), 100000)
         self.vectorizer.fit(texts[:vocab_sample_size])
 
-        self.matrix = self.vectorizer.transform(texts)
+        mat = self.vectorizer.transform(texts)
         del texts
+        gc.collect()
+        self.matrix = mat.T.tocsr()
+        del mat
         gc.collect()
         logger.info(f"TFIDFRetriever({self.field}, {self.analyzer}): fitted on {len(ids)} records")
 
@@ -235,8 +241,19 @@ class TFIDFRetriever:
         import time
         t0 = time.perf_counter()
         query_vec = self.vectorizer.transform([text])
-        # Sparse dot product against L2-normalized candidate matrix (returns 1xN csr_matrix)
-        dot_res = query_vec.dot(self.matrix.T)
+
+        # Query optimization: retain top distinctive features by IDF to eliminate millions of generic non-zeros
+        if self.analyzer == "char_wb" and query_vec.nnz > 8 and hasattr(self.vectorizer, "idf_"):
+            import scipy.sparse as sp
+            q_coo = query_vec.tocoo()
+            order = np.argsort(-self.vectorizer.idf_[q_coo.col])[:8]
+            query_vec = sp.csr_matrix(
+                (q_coo.data[order], (q_coo.row[order], q_coo.col[order])),
+                shape=query_vec.shape
+            )
+
+        # Sparse dot product against pre-transposed candidate matrix (self.matrix is (V, N) CSR)
+        dot_res = query_vec.dot(self.matrix)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         tfidf_warn_ms = self.config.get("retrieval", {}).get("tfidf", {}).get("tfidf_query_warn_ms", 100.0)
         if elapsed_ms > tfidf_warn_ms:
@@ -417,7 +434,7 @@ class CandidateGenerator:
         self.exact_blocker = ExactBlocker(config)
         self.name_char_tfidf = TFIDFRetriever(config, field="name", analyzer="char_wb")
         self.name_word_tfidf = TFIDFRetriever(config, field="name", analyzer="word")
-        self.address_char_tfidf = TFIDFRetriever(config, field="address", analyzer="word")
+        self.address_char_tfidf = TFIDFRetriever(config, field="address", analyzer="char_wb")
         self.bm25 = BM25Retriever(config)
 
         dense_cfg = config.get("retrieval", {}).get("dense_ann", {})
@@ -470,6 +487,8 @@ class CandidateGenerator:
             _, b_embs = self.embedding_gen.encode_record_field(b_recs, field=field)
             faiss_idx.add_batch(b_embs, b_ids)
             del b_embs, b_recs
+            if (b_start - init_sample_size) % (batch_size * 10) == 0:
+                logger.info(f"FAISS ({field}): streamed {min(b_start + batch_size, len(c_ids)):,} / {len(c_ids):,} candidate vectors...")
 
     def setup(self, s1_records: Dict[str, Record],
               s2_records: Optional[Dict[str, Record]] = None,
@@ -492,11 +511,11 @@ class CandidateGenerator:
         # Build dense ANN index in streaming batches (strictly bounded memory)
         dense_cfg = self.config.get("retrieval", {}).get("dense_ann", {})
         if build_dense_index and self.embedding_gen and dense_cfg.get("enabled", True):
-            batch_size = dense_cfg.get("batch_size", 4096)
+            stream_batch = dense_cfg.get("stream_batch_size", 16384)
             logger.info("Building dense FAISS ANN indexes in streaming batches (name, address, record)...")
-            self._build_dense_index_batched(self.name_ann_index, self.all_candidate_records, field="name", batch_size=batch_size)
-            self._build_dense_index_batched(self.address_ann_index, self.all_candidate_records, field="address", batch_size=batch_size)
-            self._build_dense_index_batched(self.record_ann_index, self.all_candidate_records, field="record", batch_size=batch_size)
+            self._build_dense_index_batched(self.name_ann_index, self.all_candidate_records, field="name", batch_size=stream_batch)
+            self._build_dense_index_batched(self.address_ann_index, self.all_candidate_records, field="address", batch_size=stream_batch)
+            self._build_dense_index_batched(self.record_ann_index, self.all_candidate_records, field="record", batch_size=stream_batch)
             logger.info(f"FAISS ANN ready with {len(self.all_candidate_records)} candidate vectors across 3 indexes")
 
         logger.info("All retrieval channels ready")
@@ -589,7 +608,7 @@ class CandidateGenerator:
                     pair.record_ann_rank = rank
                     pair.record_ann_score = sim
 
-        # Compute retrieval votes
+        # Compute retrieval votes across active channels
         for pair in candidate_dict.values():
             pair.retrieval_votes = sum([
                 pair.found_by_exact,
@@ -597,9 +616,6 @@ class CandidateGenerator:
                 pair.found_by_word_tfidf,
                 pair.found_by_address_tfidf,
                 pair.found_by_bm25,
-                pair.found_by_name_ann,
-                pair.found_by_address_ann,
-                pair.found_by_record_ann,
             ])
 
         # Candidate Compression (RRF + top-K)
@@ -631,9 +647,6 @@ class CandidateGenerator:
                 pair.word_tfidf_rank,
                 pair.address_tfidf_rank,
                 pair.bm25_rank,
-                pair.name_ann_rank,
-                pair.address_ann_rank,
-                pair.record_ann_rank,
             ]:
                 if rank > 0:
                     score += 1.0 / (rrf_k + rank)

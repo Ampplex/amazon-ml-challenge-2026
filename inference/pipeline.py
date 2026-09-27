@@ -104,10 +104,46 @@ def run_inference(
     s1_all_ids = list(s1_df["entity_id"])
     logger.info(f"Loaded {len(s1_df)} Test S1 entities")
 
-    # Open output files with headers
-    with open(cand_out_path, "w", encoding="utf-8") as f_cand, open(match_out_path, "w", encoding="utf-8") as f_match:
-        f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
-        f_match.write("source1_entity_id\tmatched_entity_ids\n")
+    # Check for existing output files to support resume without wasted compute
+    processed_s1_ids = set()
+    if os.path.exists(cand_out_path) and os.path.exists(match_out_path):
+        cand_lines = {}
+        with open(cand_out_path, "r", encoding="utf-8") as f:
+            header = f.readline()
+            if "source1_entity_id" in header:
+                for line in f:
+                    parts = line.rstrip("\r\n").split("\t")
+                    if parts and parts[0]:
+                        cand_lines[parts[0]] = line.rstrip("\r\n")
+        match_lines = {}
+        with open(match_out_path, "r", encoding="utf-8") as f:
+            header = f.readline()
+            if "source1_entity_id" in header:
+                for line in f:
+                    parts = line.rstrip("\r\n").split("\t")
+                    if parts and parts[0]:
+                        match_lines[parts[0]] = line.rstrip("\r\n")
+
+        common_ids = [sid for sid in cand_lines if sid in match_lines]
+        if common_ids:
+            processed_s1_ids = set(common_ids)
+            # If there was an inconsistent trailing write, rewrite to strictly synchronized state
+            if len(common_ids) != len(cand_lines) or len(common_ids) != len(match_lines):
+                logger.warning(f"Resynchronizing output files to {len(common_ids):,} common flushed entities...")
+                with open(cand_out_path, "w", encoding="utf-8") as f_cand:
+                    f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+                    for sid in common_ids:
+                        f_cand.write(f"{cand_lines[sid]}\n")
+                with open(match_out_path, "w", encoding="utf-8") as f_match:
+                    f_match.write("source1_entity_id\tmatched_entity_ids\n")
+                    for sid in common_ids:
+                        f_match.write(f"{match_lines[sid]}\n")
+            logger.info(f"RESUME DETECTED: found {len(processed_s1_ids):,} already processed entities on disk. Resuming...")
+
+    if not processed_s1_ids:
+        with open(cand_out_path, "w", encoding="utf-8") as f_cand, open(match_out_path, "w", encoding="utf-8") as f_match:
+            f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+            f_match.write("source1_entity_id\tmatched_entity_ids\n")
 
     # Detect unique countries dynamically (open-set support)
     s1_df["country_clean"] = s1_df["country"].fillna("").astype(str).str.strip().str.lower()
@@ -134,11 +170,18 @@ def run_inference(
         partitions.append("unknown")
     logger.info(f"Partitions to process: {partitions}")
 
-    total_processed_s1 = 0
+    s1_by_country: Dict[str, pd.DataFrame] = {}
+    for c in partitions:
+        c_target = "" if c == "unknown" else c
+        s1_by_country[c] = s1_df[s1_df["country_clean"] == c_target]
+    del s1_df
+    import gc
+    gc.collect()
+
+    total_processed_s1 = len(processed_s1_ids)
     total_matches_formed = 0
     total_singletons = 0
 
-    import gc
     from preprocessing.schema import get_country_partition_records
 
     for country in partitions:
@@ -146,43 +189,47 @@ def run_inference(
         logger.info(f"Processing Country Partition: {country.upper()}")
         logger.info(f"==========================================")
 
-        c_target = "" if country == "unknown" else country
-        s1_c = s1_df[s1_df["country_clean"] == c_target]
+        s1_c = s1_by_country.pop(country, pd.DataFrame())
         if len(s1_c) == 0:
             continue
 
+        if processed_s1_ids:
+            s1_c = s1_c[~s1_c["entity_id"].isin(processed_s1_ids)]
+            if len(s1_c) == 0:
+                logger.info(f"All entities for partition '{country.upper()}' already completed on disk. Skipping.")
+                continue
+
         s1_records = build_records(s1_c)
+        del s1_c
+        gc.collect()
 
-        # Stream candidate partition records directly from TSV without loading full 10M rows into RAM
-        s2_records = get_country_partition_records(s2_path, country)
-        s3_records = get_country_partition_records(s3_path, country)
+        # Stream candidate partition records directly from TSV into a single dict without RAM duplication
+        cand_records = get_country_partition_records(s2_path, country)
+        get_country_partition_records(s3_path, country, existing_dict=cand_records)
 
-        if sample_test_size and sample_test_size < len(s1_all_ids):
+        if sample_test_size:
             # Subsample distractors for verification run
-            s2_sub = list(s2_records.keys())[:sample_test_size * 5]
-            s3_sub = list(s3_records.keys())[:sample_test_size * 5]
-            s2_records = {k: s2_records[k] for k in s2_sub}
-            s3_records = {k: s3_records[k] for k in s3_sub}
+            cand_sub = list(cand_records.keys())[:sample_test_size * 10]
+            cand_records = {k: cand_records[k] for k in cand_sub}
 
-        logger.info(f"Partition counts: S1={len(s1_records):,}, S2={len(s2_records):,}, S3={len(s3_records):,}")
+        logger.info(f"Partition counts: S1={len(s1_records):,}, Candidates={len(cand_records):,}")
 
         # 3. Normalization & Parsing for this partition
-        cand_records = {**s2_records, **s3_records}
         normalize_all_names(s1_records, config)
         normalize_all_names(cand_records, config)
         normalize_all_addresses(s1_records, config)
         normalize_all_addresses(cand_records, config)
 
-        # 4. Multi-Channel Candidate Generation & Dense Embeddings
+        # 4. Multi-Channel Candidate Generation
         cand_gen = CandidateGenerator(config, embedding_gen=embedding_gen)
-        cand_gen.setup(s1_records, candidate_records=cand_records, build_dense_index=True)
+        cand_gen.setup(s1_records, candidate_records=cand_records, build_dense_index=False)
 
         # Clear embeddings cache to use direct CandidatePair semantic scores
         feature_engine.set_embeddings_cache(None)
 
         # Process S1 entities in batches
         s1_ids_list = list(s1_records.keys())
-        sub_batch = 10000
+        sub_batch = 1000
 
         for b_start in range(0, len(s1_ids_list), sub_batch):
             b_ids = s1_ids_list[b_start:b_start + sub_batch]
@@ -215,24 +262,11 @@ def run_inference(
                     X_b, b_s1_names, b_cand_names, _ = feature_engine.features_to_arrays(pf_list)
                     raw_preds = ranker.predict(X_b)
 
-                    # Ambiguity detection & selective Cross-Encoder reranking
-                    batch_cand_scores: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-                    for s1_id, cand_id, score in zip(b_s1_names, b_cand_names, raw_preds):
-                        batch_cand_scores[s1_id].append((cand_id, float(score)))
+                    # Vectorized probability calibration across entire batch
+                    calibrated_preds = calibrator.calibrate(raw_preds)
 
-                    ce_scores_dict = {}
-                    if cross_encoder and cross_encoder.model is not None:
-                        amb_dict = cross_encoder.identify_ambiguous(batch_cand_scores)
-                        amb_pairs = [(s1, c) for s1, cs in amb_dict.items() for c in cs]
-                        if amb_pairs:
-                            ce_scores_dict = cross_encoder.rerank(amb_pairs, s1_records, cand_records)
-
-                    # Score fusion & calibration
-                    for s1_id, cand_id, score in zip(b_s1_names, b_cand_names, raw_preds):
-                        ce_s = ce_scores_dict.get((s1_id, cand_id))
-                        fused_s = fusion_model.fuse_scores(score, cross_encoder_score=ce_s)
-                        calibrated_s = calibrator.calibrate(np.array([fused_s]))[0]
-                        entity_scores[s1_id].append((cand_id, float(calibrated_s)))
+                    for s1_id, cand_id, score in zip(b_s1_names, b_cand_names, calibrated_preds):
+                        entity_scores[s1_id].append((cand_id, float(score)))
 
             # Entity-level decision
             decision_engine = EntityDecisionEngine(threshold=optimal_threshold)
@@ -259,10 +293,18 @@ def run_inference(
                         total_singletons += 1
 
             total_processed_s1 += len(b_ids)
-            logger.info(f"Progress ({country.upper()}): {total_processed_s1:,} / {len(s1_all_ids):,} S1 entities done...")
+            if total_processed_s1 % 5000 == 0 or b_start + sub_batch >= len(s1_ids_list):
+                logger.info(f"Progress ({country.upper()}): {total_processed_s1:,} / {len(s1_all_ids):,} S1 entities done...")
+
+            del b_s1_records, b_candidates, flat_pairs, entity_scores
+            if 'pf_list' in locals():
+                del pf_list
+            if 'X_b' in locals():
+                del X_b, raw_preds, batch_cand_scores
+            gc.collect()
 
         # Free partition memory
-        del s1_records, s2_records, s3_records, cand_records, cand_gen
+        del s1_records, cand_records, cand_gen
         gc.collect()
 
     logger.info("==================================================")

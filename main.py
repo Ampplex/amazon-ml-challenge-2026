@@ -86,9 +86,11 @@ def main():
 
     if args.mode in ("infer", "full"):
         logger.info(">>> Starting Inference Phase <<<")
+        # If running the full pipeline, we ALWAYS want to infer on the full test set
+        test_sample = None if args.mode == "full" else args.sample_size
         run_inference(
             config_path=args.config,
-            sample_test_size=args.sample_size
+            sample_test_size=test_sample
         )
 
     if args.mode == "validate":

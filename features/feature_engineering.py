@@ -407,7 +407,7 @@ class RarityFeatureComputer:
 # =============================================================================
 
 def compute_retrieval_features(pair: CandidatePair) -> Dict[str, float]:
-    """Extract features from the retrieval/blocking metadata."""
+    """Extract features from the retrieval/blocking metadata (active channels only)."""
     features = {}
 
     features["found_exact"] = 1.0 if pair.found_by_exact else 0.0
@@ -415,35 +415,28 @@ def compute_retrieval_features(pair: CandidatePair) -> Dict[str, float]:
     features["found_word_tfidf"] = 1.0 if pair.found_by_word_tfidf else 0.0
     features["found_address_tfidf"] = 1.0 if pair.found_by_address_tfidf else 0.0
     features["found_bm25"] = 1.0 if pair.found_by_bm25 else 0.0
-    features["found_name_ann"] = 1.0 if pair.found_by_name_ann else 0.0
-    features["found_address_ann"] = 1.0 if pair.found_by_address_ann else 0.0
-    features["found_record_ann"] = 1.0 if pair.found_by_record_ann else 0.0
 
     # Retrieval similarity scores (continuous features)
     features["char_tfidf_score"] = float(pair.char_tfidf_score)
     features["word_tfidf_score"] = float(pair.word_tfidf_score)
     features["address_tfidf_score"] = float(pair.address_tfidf_score)
     features["bm25_score"] = float(pair.bm25_score)
-    features["name_ann_score"] = float(pair.name_ann_score)
-    features["address_ann_score"] = float(pair.address_ann_score)
-    features["record_ann_score"] = float(pair.record_ann_score)
 
     features["retrieval_votes"] = float(pair.retrieval_votes)
     features["rrf_score"] = pair.rrf_score
     features["is_multi_channel"] = 1.0 if pair.retrieval_votes >= 2 else 0.0
 
-    # Rank features (0 = not found)
+    # Rank features across active channels (0 = not found)
     ranks = []
-    for rank_val in [pair.name_ann_rank, pair.address_ann_rank, pair.record_ann_rank,
-                     pair.char_tfidf_rank, pair.word_tfidf_rank, pair.address_tfidf_rank, pair.bm25_rank]:
+    for rank_val in [pair.char_tfidf_rank, pair.word_tfidf_rank, pair.address_tfidf_rank, pair.bm25_rank]:
         if rank_val > 0:
             ranks.append(rank_val)
 
     features["best_rank"] = float(min(ranks)) if ranks else 0.0
     features["mean_rank"] = float(np.mean(ranks)) if ranks else 0.0
-    features["name_ann_rank"] = float(pair.name_ann_rank)
-    features["address_ann_rank"] = float(pair.address_ann_rank)
-    features["record_ann_rank"] = float(pair.record_ann_rank)
+    features["char_tfidf_rank"] = float(pair.char_tfidf_rank)
+    features["word_tfidf_rank"] = float(pair.word_tfidf_rank)
+    features["address_tfidf_rank"] = float(pair.address_tfidf_rank)
     features["bm25_rank"] = float(pair.bm25_rank)
 
     return features
@@ -487,10 +480,11 @@ class FeatureEngine:
         # Structural features
         all_features.update(compute_structural_features(s1, candidate))
 
-        # Semantic features
-        all_features.update(compute_semantic_features(
-            s1, candidate, pair=pair, embeddings_cache=self.embeddings_cache
-        ))
+        # Semantic features (only if enabled)
+        if self.config.get("features", {}).get("semantic", {}).get("enabled", False):
+            all_features.update(compute_semantic_features(
+                s1, candidate, pair=pair, embeddings_cache=self.embeddings_cache
+            ))
 
         # Rarity features
         all_features.update(self.rarity_computer.compute_rarity_features(s1, candidate))

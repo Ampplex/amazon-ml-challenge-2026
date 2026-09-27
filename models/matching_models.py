@@ -257,6 +257,18 @@ class CrossEncoderReranker:
         for key, score in zip(pair_keys, scores):
             result[key] = float(score)
 
+        # Flush PyTorch accelerator cache to prevent unified memory bloat on Apple Silicon MPS / CUDA
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        import gc
+        gc.collect()
+
         logger.info(f"Cross-encoder scored {len(result)} pairs")
         return result
 

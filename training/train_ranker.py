@@ -231,8 +231,21 @@ def run_training(
     gt_dict = parse_ground_truth(gt_df)
 
     if sample_s1_size and sample_s1_size < len(s1_df):
-        logger.info(f"Subsampling {sample_s1_size} S1 records for development out of {len(s1_df)}...")
-        s1_df = s1_df.sample(n=sample_s1_size, random_state=random_seed).reset_index(drop=True)
+        logger.info(f"Subsampling {sample_s1_size} S1 records using Stratified Sampling...")
+        
+        # Stratify by Country AND whether it is a Singleton (has no matches) vs has matches
+        s1_df['has_matches'] = s1_df['entity_id'].map(lambda x: len(gt_dict.get(x, [])) > 0)
+        s1_df['stratify_key'] = s1_df['country'].astype(str) + "_" + s1_df['has_matches'].astype(str)
+        
+        from sklearn.model_selection import train_test_split
+        _, s1_df = train_test_split(
+            s1_df, 
+            test_size=sample_s1_size, 
+            random_state=random_seed, 
+            stratify=s1_df['stratify_key']
+        )
+        s1_df = s1_df.drop(columns=['has_matches', 'stratify_key']).reset_index(drop=True)
+        
         sampled_s1_ids = set(s1_df["entity_id"])
         gt_dict = {k: v for k, v in gt_dict.items() if k in sampled_s1_ids}
     else:
@@ -331,7 +344,7 @@ def run_training(
         normalize_all_addresses(cand_partition, config)
 
         cand_gen = CandidateGenerator(config, embedding_gen=embedding_gen)
-        cand_gen.setup(p_s1, candidate_records=cand_partition, build_dense_index=True)
+        cand_gen.setup(p_s1, candidate_records=cand_partition, build_dense_index=False)
 
         # 5a. Stream Train Candidates into Disk Buffer
         if p_train_s1:
@@ -466,29 +479,31 @@ def run_training(
     logger.info("=== STEP 10: Scoring Calibration Set & Budget-Enforced CE Reranking ===")
     raw_scores_cal = ranker.predict(X_cal_all)
 
-    fusion_model = FusionModel(config)
     cross_encoder = None
-    if config.get("cross_encoder", {}).get("enabled", True):
+    if config.get("cross_encoder", {}).get("enabled", False):
         cross_encoder = CrossEncoderReranker(config)
         cross_encoder.load_model()
 
-    cal_cand_scores_dict: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-    for s1_id, cand_id, score in zip(c_s1_all, c_cand_all, raw_scores_cal):
-        cal_cand_scores_dict[s1_id].append((cand_id, float(score)))
-
-    ce_scores_lookup = {}
     if cross_encoder and cross_encoder.model is not None:
+        fusion_model = FusionModel(config)
+        cal_cand_scores_dict: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+        for s1_id, cand_id, score in zip(c_s1_all, c_cand_all, raw_scores_cal):
+            cal_cand_scores_dict[s1_id].append((cand_id, float(score)))
+
         ambiguous_dict = cross_encoder.identify_ambiguous(cal_cand_scores_dict)
         amb_pairs = [(s1, c) for s1, cands in ambiguous_dict.items() for c in cands]
+        ce_scores_lookup = {}
         if amb_pairs:
             logger.info(f"Reranking {len(amb_pairs):,} ambiguous calibration pairs with Cross-Encoder...")
             ce_scores_lookup = cross_encoder.rerank(amb_pairs, s1_text_cache, cand_text_cache)
 
-    fused_scores_cal = np.zeros(len(raw_scores_cal), dtype=np.float32)
-    for i, (s1_id, cand_id) in enumerate(zip(c_s1_all, c_cand_all)):
-        lgb_s = raw_scores_cal[i]
-        ce_s = ce_scores_lookup.get((s1_id, cand_id))
-        fused_scores_cal[i] = fusion_model.fuse_scores(lgb_s, cross_encoder_score=ce_s)
+        fused_scores_cal = np.zeros(len(raw_scores_cal), dtype=np.float32)
+        for i, (s1_id, cand_id) in enumerate(zip(c_s1_all, c_cand_all)):
+            lgb_s = raw_scores_cal[i]
+            ce_s = ce_scores_lookup.get((s1_id, cand_id))
+            fused_scores_cal[i] = fusion_model.fuse_scores(lgb_s, cross_encoder_score=ce_s)
+    else:
+        fused_scores_cal = raw_scores_cal
 
     # 11. Calibration & F0.5 Optimization on Calibration Set
     logger.info("=== STEP 11: Calibration & F0.5 Optimization on Calibration Set ===")
@@ -508,23 +523,25 @@ def run_training(
     logger.info("=== STEP 12: Evaluating on UNTOUCHED Final Holdout Set ===")
     raw_scores_holdout = ranker.predict(X_holdout_all)
 
-    holdout_cand_scores_dict: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-    for s1_id, cand_id, score in zip(h_s1_all, h_cand_all, raw_scores_holdout):
-        holdout_cand_scores_dict[s1_id].append((cand_id, float(score)))
-
-    ce_holdout_lookup = {}
     if cross_encoder and cross_encoder.model is not None:
+        holdout_cand_scores_dict: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+        for s1_id, cand_id, score in zip(h_s1_all, h_cand_all, raw_scores_holdout):
+            holdout_cand_scores_dict[s1_id].append((cand_id, float(score)))
+
         amb_holdout = cross_encoder.identify_ambiguous(holdout_cand_scores_dict)
         amb_h_pairs = [(s1, c) for s1, cands in amb_holdout.items() for c in cands]
+        ce_holdout_lookup = {}
         if amb_h_pairs:
             logger.info(f"Reranking {len(amb_h_pairs):,} ambiguous holdout pairs with Cross-Encoder...")
             ce_holdout_lookup = cross_encoder.rerank(amb_h_pairs, s1_text_cache, cand_text_cache)
 
-    fused_scores_holdout = np.zeros(len(raw_scores_holdout), dtype=np.float32)
-    for i, (s1_id, cand_id) in enumerate(zip(h_s1_all, h_cand_all)):
-        lgb_s = raw_scores_holdout[i]
-        ce_s = ce_holdout_lookup.get((s1_id, cand_id))
-        fused_scores_holdout[i] = fusion_model.fuse_scores(lgb_s, cross_encoder_score=ce_s)
+        fused_scores_holdout = np.zeros(len(raw_scores_holdout), dtype=np.float32)
+        for i, (s1_id, cand_id) in enumerate(zip(h_s1_all, h_cand_all)):
+            lgb_s = raw_scores_holdout[i]
+            ce_s = ce_holdout_lookup.get((s1_id, cand_id))
+            fused_scores_holdout[i] = fusion_model.fuse_scores(lgb_s, cross_encoder_score=ce_s)
+    else:
+        fused_scores_holdout = raw_scores_holdout
 
     calibrated_scores_holdout = calibrator.calibrate(fused_scores_holdout)
 

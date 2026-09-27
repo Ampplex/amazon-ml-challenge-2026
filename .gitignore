@@ -44,3 +44,10 @@ dataset.zip
 outputs/
 models/cache/
 *.log
+
+# Additional ML Pipeline ignores
+models/saved/
+models_full/
+outputs_full/
+*.tsv
+*.zip

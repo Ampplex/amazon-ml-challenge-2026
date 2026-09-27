@@ -1,4 +1,4 @@
 {
-  "threshold": 0.67,
-  "holdout_macro_f05": 0.9819846252536595
+  "threshold": 0.58,
+  "holdout_macro_f05": 0.9852278545826934
 }
